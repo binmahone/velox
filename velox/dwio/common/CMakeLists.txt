@@ -74,3 +74,46 @@ target_link_libraries(
   Boost::regex
   Folly::folly
   glog::glog)
+
+add_library(
+        clickhouse_dwio_common
+        BitConcatenation.cpp
+        BitPackDecoder.cpp
+        BufferedInput.cpp
+        CachedBufferedInput.cpp
+        CacheInputStream.cpp
+        ColumnSelector.cpp
+        DataBufferHolder.cpp
+        DecoderUtil.cpp
+        DirectDecoder.cpp
+        DwioMetricsLog.cpp
+        FileSink.cpp
+        FlatMapHelper.cpp
+        InputStream.cpp
+        IntDecoder.cpp
+        IoStatistics.cpp
+        # MetadataFilter.cpp
+        Options.cpp
+        OutputStream.cpp
+        Range.cpp
+        Reader.cpp
+        ReaderFactory.cpp
+        ScanSpec.cpp
+        ColumnLoader.cpp
+        SelectiveByteRleColumnReader.cpp
+        SelectiveColumnReader.cpp
+        SelectiveRepeatedColumnReader.cpp
+        SelectiveStructColumnReader.cpp
+        SeekableInputStream.cpp
+        TypeUtils.cpp
+        TypeWithId.cpp
+        WriterFactory.cpp
+        SortingWriter.cpp
+        SortingWriter.h)
+target_link_libraries(
+        clickhouse_dwio_common
+        velox_dwio_common_compression
+        fmt::fmt
+        Folly::folly
+        xsimd
+)
