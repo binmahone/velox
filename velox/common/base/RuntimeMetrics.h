@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include <fmt/format.h>
+#include <fmt/core.h>
 #include <folly/CppAttributes.h>
 #include <limits>
 #include <sstream>
@@ -111,3 +111,15 @@ class RuntimeStatWriterScopeGuard {
 };
 
 } // namespace facebook::velox
+
+template <>
+struct fmt::formatter<facebook::velox::RuntimeCounter::Unit> {
+  constexpr auto parse(format_parse_context& ctx) {
+    return ctx.begin();
+  }
+
+  template <typename FormatContext>
+  auto format(const facebook::velox::RuntimeCounter::Unit& k, FormatContext& ctx) const {
+    return format_to(ctx.out(), "{}", static_cast<int32_t>(k));
+  }
+};

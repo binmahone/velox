@@ -39,3 +39,23 @@ target_link_libraries(
   thrift
   zstd::zstd
   ${Protobuf_LIBRARIES})
+
+add_library(
+        clickhouse_dwio_native_parquet_reader
+        NestedStructureDecoder.cpp
+        ParquetReader.cpp
+        ParquetTypeWithId.cpp
+        PageReader.cpp
+        ParquetColumnReader.cpp
+        ParquetData.cpp
+        RepeatedColumnReader.cpp
+        RleBpDecoder.cpp
+        Statistics.cpp
+        StructColumnReader.cpp
+        StringColumnReader.cpp)
+target_link_libraries(
+        clickhouse_dwio_native_parquet_reader
+        arrow
+        Folly::folly
+        xsimd
+)

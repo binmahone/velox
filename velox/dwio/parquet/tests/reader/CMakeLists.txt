@@ -18,8 +18,12 @@ add_test(
   COMMAND velox_dwio_parquet_reader_test
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(
-  velox_dwio_parquet_reader_test velox_dwio_native_parquet_reader
-  velox_link_libs ${TEST_LINK_LIBS})
+  velox_dwio_parquet_reader_test
+        velox_dwio_native_parquet_reader
+        velox_exec_test_lib
+        velox_exec
+        velox_hive_connector
+        ${TEST_LINK_LIBS})
 
 add_executable(velox_dwio_parquet_page_reader_test ParquetPageReaderTest.cpp)
 add_test(
@@ -96,3 +100,18 @@ if(${VELOX_ENABLE_ARROW})
     arrow velox_link_libs ${TEST_LINK_LIBS})
 
 endif()
+
+# add_executable(clickhouse_dwio_parquet_reader_test parquet_read.cpp)
+# target_link_libraries(clickhouse_dwio_parquet_reader_test
+#         clickhouse_dwio_native_parquet_reader
+#         velox_exception
+#         velox_dwio_parquet_thrift
+#         parquet
+#         clickhouse_dwio_common
+#         velox_type
+#         velox_file
+#         velox_vector
+#         velox_memory
+#         velox_dwio_common_exception
+#         velox_common_compression)
+# # velox_expression => filter rowgroup

@@ -699,9 +699,9 @@ void ParquetRowReader::filterRowGroups() {
 
   ParquetData::FilterRowGroupsResult res;
   columnReader_->filterRowGroups(0, ParquetStatsContext(), res);
-  if (auto& metadataFilter = options_.getMetadataFilter()) {
-    metadataFilter->eval(res.metadataFilterResults, res.filterResult);
-  }
+//  if (auto& metadataFilter = options_.getMetadataFilter()) {
+//    metadataFilter->eval(res.metadataFilterResults, res.filterResult);
+//  }
 
   uint64_t rowNumber = 0;
   for (auto i = 0; i < rowGroups_.size(); i++) {
