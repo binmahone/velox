@@ -26,6 +26,11 @@
 #include <folly/Benchmark.h>
 #include <folly/init/Init.h>
 
+#include "velox/dwio/parquet/reader/ParquetReader.h"
+#include "velox/expression/Expr.h"
+#include "velox/expression/ExprToSubfieldFilter.h"
+#include <chrono>
+
 using namespace facebook::velox;
 using namespace facebook::velox::dwio;
 using namespace facebook::velox::dwio::common;
@@ -374,9 +379,77 @@ PARQUET_BENCHMARKS_NO_FILTER(ARRAY(BIGINT()), List);
 
 // TODO: Add all data types
 
+
+auto defaultPool = memory::addDefaultLeafMemoryPool();
+
+ParquetReader createReader(const std::string & path, const facebook::velox::dwio::common::ReaderOptions & opts)
+{
+    return ParquetReader(std::make_unique<BufferedInput>(std::make_shared<LocalReadFile>(path), opts.getMemoryPool()), opts);
+}
+
+dwio::common::RowReaderOptions getReaderOpts(const RowTypePtr & rowType, bool fileColumnNamesReadAsLowerCase = false)
+{
+    dwio::common::RowReaderOptions row_reader_opts;
+    row_reader_opts.select(std::make_shared<facebook::velox::dwio::common::ColumnSelector>(
+        rowType, rowType->names(), nullptr, fileColumnNamesReadAsLowerCase));
+
+    return row_reader_opts;
+}
+
+std::shared_ptr<facebook::velox::common::ScanSpec> makeScanSpec(const RowTypePtr & rowType)
+{
+    auto scan_spec = std::make_shared<facebook::velox::common::ScanSpec>("root");
+    scan_spec->addAllChildFields(*rowType);
+    return scan_spec;
+}
+
+
 int main(int argc, char** argv) {
   folly::init(&argc, &argv);
-  folly::runBenchmarks();
+  //folly::runBenchmarks();
+
+
+auto start = std::chrono::steady_clock::now();
+
+    const std::string sample("/tmp/lineitem_reorder/part-00000-7a5b52dd-25ef-40f5-886a-b3cdbead62cf-c000.snappy.parquet");
+    facebook::velox::dwio::common::ReaderOptions reader_options{defaultPool.get()};
+    ParquetReader reader = createReader(sample, reader_options);
+
+
+    auto schema = ROW({"l_shipdate", "l_discount", "l_extendedprice", "l_quantity"}, {INTEGER(), DOUBLE(), DOUBLE(), DOUBLE()});
+    auto row_reader_opts = getReaderOpts(schema);
+    auto scan_spec = makeScanSpec(schema);
+
+    // set filters:
+    auto subfieldFilter = exec::greaterThanDouble(0.08);
+    scan_spec->childByName("l_discount")->setFilter(std::move(subfieldFilter));
+
+    auto subfieldFilter2 = exec::lessThanDouble(15);
+    scan_spec->childByName("l_quantity")->setFilter(std::move(subfieldFilter2));
+
+
+    row_reader_opts.setScanSpec(scan_spec);
+    auto row_reader = reader.createRowReader(row_reader_opts);
+    uint64_t total = 0;
+    uint64_t returned = 0;
+    VectorPtr result = BaseVector::create(schema, 0, defaultPool.get());
+    while (true)
+    {
+        returned = row_reader->next(1000, result);
+        auto nulls = result->nulls();
+        if(returned == 0){
+            break;
+        }
+        total += result->size();
+        // std::cout << "returened: " << returned << '\n';
+        // std::cout << "result->size(): " << result->size() << '\n';
+        // total += result->size();
+        // std::cout << total << '\n';
+    }
+    std::cout << "total: " << total << '\n';
+
+    std::cout << "duration: " << std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count() << std::endl;
+
   return 0;
 }
 

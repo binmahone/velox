@@ -104,7 +104,7 @@ class ParquetTpchTestBase : public testing::Test {
       std::optional<std::vector<uint32_t>> sortingKeys) const {
     bool noMoreSplits = false;
     constexpr int kNumSplits = 10;
-    constexpr int kNumDrivers = 4;
+    constexpr int kNumDrivers = 1;
     auto addSplits = [&](Task* task) {
       if (!noMoreSplits) {
         for (const auto& entry : tpchPlan.dataFiles) {

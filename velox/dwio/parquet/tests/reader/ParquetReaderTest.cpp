@@ -15,6 +15,8 @@
  */
 
 #include "velox/dwio/parquet/reader/ParquetReader.h"
+#include <vector/ComplexVector.h>
+#include <vector/FlatVector.h>
 #include "velox/dwio/parquet/tests/ParquetReaderTestBase.h"
 #include "velox/expression/ExprToSubfieldFilter.h"
 
@@ -56,7 +58,94 @@ class ParquetReaderTest : public ParquetReaderTestBase {
   }
 };
 
+TEST_F(ParquetReaderTest, perfTest) {
+  auto start = std::chrono::steady_clock::now();
+
+    const std::string sample("/data0/tpch10_liuneng/parquet/lineitem/part-00000-f83d0a59-2bff-41bc-acde-911002bf1b33-c000.snappy.parquet");
+    facebook::velox::dwio::common::ReaderOptions reader_options{defaultPool.get()};
+    ParquetReader reader = createReader(sample, reader_options);
+
+
+    auto schema = ROW({"l_shipdate","l_discount", "l_extendedprice", "l_quantity"}, {INTEGER(),DOUBLE(), DOUBLE(), DOUBLE()});
+    auto row_reader_opts = getReaderOpts(schema);
+    auto scan_spec = makeScanSpec(schema);
+
+    // set filters:
+    auto subfieldFilter = exec::greaterThanDouble(0.08);
+    scan_spec->childByName("l_discount")->setFilter(std::move(subfieldFilter));
+
+    auto subfieldFilter2 = exec::lessThanDouble(15);
+    scan_spec->childByName("l_quantity")->setFilter(std::move(subfieldFilter2));
+
+
+    row_reader_opts.setScanSpec(scan_spec);
+    auto row_reader = reader.createRowReader(row_reader_opts);
+    uint64_t total = 0;
+    uint64_t returned = 0;
+    VectorPtr result = BaseVector::create(schema, 0, defaultPool.get());
+    while (true)
+    {
+        returned = row_reader->next(1000, result);
+        auto nulls = result->nulls();
+        if(returned == 0){
+            break;
+        }
+        total += result->size();
+        // std::cout << "returened: " << returned << '\n';
+        // std::cout << "result->size(): " << result->size() << '\n';
+        // total += result->size();
+        // std::cout << total << '\n';
+    }
+    std::cout << "total: " << total << '\n';
+
+    std::cout << "duration: " << std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count() << std::endl;
+}
+
 TEST_F(ParquetReaderTest, parseSample) {
+  {
+
+    const std::string sample("/home/hongbin/code/gluten-velox/velox-chenchang/velox/dwio/parquet/tests/examples/sample.parquet");
+    facebook::velox::dwio::common::ReaderOptions reader_options{defaultPool.get()};
+    ParquetReader reader = createReader(sample, reader_options);
+
+    auto schema = ROW({"a", "b"}, {BIGINT(), DOUBLE()});
+    auto row_reader_opts = getReaderOpts(schema);
+    auto scan_spec = makeScanSpec(schema);
+
+    // set filters:
+    auto subfieldFilter = exec::greaterThan(2);
+    scan_spec->childByName("a")->setFilter(std::move(subfieldFilter));
+
+    // auto subfieldFilter2 = exec::lessThanDouble(8);
+    auto subfieldFilter2 = exec::greaterThanDouble(8);
+    scan_spec->childByName("b")->setFilter(std::move(subfieldFilter2));
+
+
+    row_reader_opts.setScanSpec(scan_spec);
+    auto row_reader = reader.createRowReader(row_reader_opts);
+    uint64_t total = 0;
+    uint64_t returned = 0;
+    VectorPtr result = BaseVector::create(schema, 0, defaultPool.get());
+    returned = row_reader->next(1000, result);
+    auto nulls = result->nulls();
+    RowVectorPtr row_vector = std::dynamic_pointer_cast<RowVector>(result);
+    FlatVectorPtr<int64_t> flat_vector = std::dynamic_pointer_cast<FlatVector<int64_t>>(row_vector->childAt(0));
+    auto a = flat_vector->size();
+    std::cout << "returened: " << result->size() << '\n';
+    // total += result->size();
+    // std::cout << total << '\n';
+
+    returned = row_reader->next(1000, result);
+    std::cout << "returened: " << result->size() << '\n';
+    // total += result->size();
+    // std::cout << total << '\n';
+
+    returned = row_reader->next(1000, result);
+    std::cout << "returened: " << result->size() << '\n';
+    // total += result->size();
+    // std::cout << total << '\n';
+
+  }
   // sample.parquet holds two columns (a: BIGINT, b: DOUBLE) and
   // 20 rows (10 rows per group). Group offsets are 153 and 614.
   // Data is in plain uncompressed format:
