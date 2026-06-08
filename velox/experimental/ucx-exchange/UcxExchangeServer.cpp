@@ -40,6 +40,10 @@ struct MetaSendContext {
 
 struct DataSendContext {
   std::shared_ptr<cudf::packed_columns> data;
+  // Keeps the UCX registration of the send buffer alive until the send
+  // completes, so the rendezvous can transfer zero-copy from registered GPU
+  // memory instead of staging through host (cuda_copy).
+  std::shared_ptr<ucxx::MemoryHandle> memHandle;
 };
 
 void UcxExchangeServer::setState(ServerState newState) {
@@ -434,6 +438,15 @@ void UcxExchangeServer::sendData() {
       // stays alive for UCP wireup replay.
       auto dataCtx = std::make_shared<DataSendContext>();
       dataCtx->data = dataPtr_;
+
+      // DE-RISK (bounce-buffer concept): register the GPU send buffer with UCX
+      // (ucp_mem_map) so the tag-send rendezvous picks up the cached
+      // registration and transfers zero-copy over cuda_ipc/NVLink instead of
+      // cuda_copy host staging. Held in dataCtx until the send callback.
+      dataCtx->memHandle = communicator_->getContext()->createMemoryHandle(
+          dataCtx->data->gpu_data->size(),
+          dataCtx->data->gpu_data->data(),
+          UCS_MEMORY_TYPE_CUDA);
 
       dataRequest_ = endpointRef_->endpoint_->tagSend(
           dataCtx->data->gpu_data->data(),
