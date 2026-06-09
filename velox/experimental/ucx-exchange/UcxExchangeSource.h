@@ -142,10 +142,6 @@ class UcxExchangeSource
     MetadataMsg metadata;
     std::unique_ptr<rmm::device_buffer> dataBuf;
     rmm::cuda_stream_view stream; // The stream used to allocate dataBuf
-    // Keeps the UCX registration of the receive buffer alive until the data
-    // arrives, so a cuda_ipc put-to-remote rendezvous has a registered target
-    // and can write directly over NVLink instead of staging through host.
-    std::shared_ptr<ucxx::MemoryHandle> memHandle;
   };
 
   /// @brief The constructor is private in order to ensure that exchange sources

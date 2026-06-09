@@ -524,14 +524,6 @@ void UcxExchangeSource::onMetadata(
       return;
     }
 
-    // Register the receive buffer with UCX (CUDA memtype) so a cuda_ipc
-    // put-to-remote rendezvous has a registered target and can write directly
-    // over NVLink instead of staging through host. Held in ptr until consumed.
-    ptr->memHandle = communicator_->getContext()->createMemoryHandle(
-        ptr->dataBuf->size(),
-        ptr->dataBuf->data(),
-        UCS_MEMORY_TYPE_CUDA);
-
     VLOG(3) << toString() << " Allocated " << ptr->metadata.dataSizeBytes
             << " bytes of device memory";
 
