@@ -80,7 +80,7 @@ UcxPartitionedOutput::UcxPartitionedOutput(
         planNode->kind(),
         static_cast<int>(numPartitions_),
         numDrivers);
-    LOG(WARNING) << "UcxPartitionedOutput initialized queue task="
+    VLOG(2) << "UcxPartitionedOutput initialized queue task="
             << ctx->task->taskId() << " destinations=" << numPartitions_
             << " drivers=" << numDrivers
             << " kind=" << core::PartitionedOutputNode::toName(planNode->kind())
