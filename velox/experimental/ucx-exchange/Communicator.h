@@ -146,13 +146,6 @@ class Communicator {
     return workerId_;
   }
 
-  /// @brief Access the UCX context, for registering memory handles
-  /// (ucp_mem_map) so tag-send rendezvous can use a cached registration for a
-  /// zero-copy transfer instead of host staging.
-  const std::shared_ptr<ucxx::Context>& getContext() const {
-    return context_;
-  }
-
  private:
   Communicator() =
       default; // Private constructor to prevent direct instantiation
