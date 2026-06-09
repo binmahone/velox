@@ -18,6 +18,8 @@
 
 #include <atomic>
 
+#include <nvtx3/nvtx3.hpp>
+
 #include "velox/common/process/TraceContext.h"
 #include "velox/exec/Operator.h"
 #include "velox/exec/OperatorType.h"
@@ -802,8 +804,16 @@ void Driver::recordYieldCount() {
 }
 
 // static
+// NVTX domain tagging each driver run-slice with its task id, so a profile
+// shows which fragment/stage a given driver thread is working on over time.
+struct MppFragmentDomain {
+  static constexpr char const* name{"mpp-fragment"};
+};
+
 void Driver::run(std::shared_ptr<Driver> self) {
   process::TraceContext trace("Driver::run");
+  nvtx3::scoped_range_in<MppFragmentDomain> nvtxFragment{
+      self->task()->taskId()};
   facebook::velox::process::ScopedThreadDebugInfo scopedInfo(
       self->driverCtx()->threadDebugInfo);
   ScopedDriverThreadContext scopedDriverThreadContext(self->driverCtx());
