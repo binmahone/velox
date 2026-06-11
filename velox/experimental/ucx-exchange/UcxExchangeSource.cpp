@@ -16,6 +16,7 @@
 
 #include <thread>
 #include <vector>
+#include <chrono>
 
 #include <cudf/contiguous_split.hpp>
 #include <folly/String.h>
@@ -27,6 +28,16 @@
 
 using namespace facebook::velox::exec;
 namespace facebook::velox::ucx_exchange {
+
+namespace {
+
+int64_t steadyMillis() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+} // namespace
 
 void UcxExchangeSource::setState(ReceiverState newState) {
   auto oldState = state_.exchange(newState, std::memory_order_seq_cst);
@@ -308,6 +319,17 @@ void UcxExchangeSource::deliverEndMarker() {
           expected, true, std::memory_order_acq_rel)) {
     // Already delivered by another thread/path.
     return;
+  }
+  if (queue_->traceEnabled()) {
+    LOG(WARNING) << "MppExchangeTrace event=sourceEnd"
+                 << " tMs=" << steadyMillis()
+                 << " " << queue_->traceLabel()
+                 << " localTask=" << taskId_
+                 << " remoteTask=" << partitionKey_.taskId
+                 << " destination=" << partitionKey_.destination
+                 << " seq=" << sequenceNumber_
+                 << " state=" << getStateAsString()
+                 << " intraNode=" << isIntraNodeTransfer_;
   }
   VLOG(3) << toString() << " delivering end-of-stream marker to queue";
   enqueue(nullptr);
@@ -603,6 +625,18 @@ void UcxExchangeSource::onData(ucs_status_t status, std::shared_ptr<void> arg) {
 
     metrics_.numPackedColumns_.addValue(1);
     metrics_.totalBytes_.addValue(ptr->metadata.dataSizeBytes);
+    if (queue_->traceEnabled() && !firstDataLogged_) {
+      firstDataLogged_ = true;
+      LOG(WARNING) << "MppExchangeTrace event=sourceFirstData"
+                   << " tMs=" << steadyMillis()
+                   << " " << queue_->traceLabel()
+                   << " localTask=" << taskId_
+                   << " remoteTask=" << partitionKey_.taskId
+                   << " destination=" << partitionKey_.destination
+                   << " seq=" << (sequenceNumber_ - 1)
+                   << " bytes=" << ptr->metadata.dataSizeBytes
+                   << " intraNode=false";
+    }
 
     // Create packed_columns from the received metadata and data buffer
     cudf::packed_columns packedCols(
@@ -787,6 +821,18 @@ void UcxExchangeSource::onIntraNodeData(
 
   metrics_.numPackedColumns_.addValue(1);
   metrics_.totalBytes_.addValue(data->gpu_data->size());
+  if (queue_->traceEnabled() && !firstDataLogged_) {
+    firstDataLogged_ = true;
+    LOG(WARNING) << "MppExchangeTrace event=sourceFirstData"
+                 << " tMs=" << steadyMillis()
+                 << " " << queue_->traceLabel()
+                 << " localTask=" << taskId_
+                 << " remoteTask=" << partitionKey_.taskId
+                 << " destination=" << partitionKey_.destination
+                 << " seq=" << sequenceNumber_
+                 << " bytes=" << data->gpu_data->size()
+                 << " intraNode=true";
+  }
   // Broadcast output can share the same packed_columns across multiple
   // destinations. Keep the zero-copy path for uniquely owned partitioned
   // pages, but clone shared pages before moving out of them.

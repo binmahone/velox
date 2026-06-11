@@ -16,6 +16,8 @@
 #include "velox/experimental/ucx-exchange/UcxExchange.h"
 #include "velox/experimental/cudf/vector/CudfVector.h"
 
+#include <fmt/format.h>
+
 using facebook::velox::exec::Operator;
 using facebook::velox::exec::RemoteConnectorSplit;
 // Required by VELOX_NVTX_OPERATOR_FUNC_RANGE macro in NvtxHelper.h which
@@ -46,7 +48,16 @@ UcxExchange::UcxExchange(
           driverCtx->queryConfig().preferredOutputBatchBytes()},
       processSplits_{driverCtx->driverId == 0},
       pipelineId_{driverCtx->pipelineId},
-      driverId_{driverCtx->driverId} {
+      driverId_{driverCtx->driverId},
+      exchangeTraceEnabled_{driverCtx->queryConfig().get<bool>(
+          "spark.gluten.mpp.exchangeTrace.enabled", false)} {
+  const auto traceLabel = fmt::format(
+      "consumerTask={} destination={} planNode={} pipeline={} operatorId={}",
+      taskId(),
+      driverCtx->task->destination(),
+      planNode->id(),
+      pipelineId_,
+      operatorId);
   if (ucxExchangeClient) {
     // UcxExchangeClient is provided externally when this is a "plain"
     // UcxExchange.
@@ -58,8 +69,17 @@ UcxExchange::UcxExchange(
     exchangeClient_ = std::make_shared<UcxExchangeClient>(
         task->taskId(),
         task->destination(),
-        1 // number of consumers, is always 1.
+        1, // number of consumers, is always 1.
+        10,
+        exchangeTraceEnabled_,
+        traceLabel
     );
+  }
+  if (exchangeTraceEnabled_ && processSplits_) {
+    LOG(WARNING) << "MppExchangeTrace event=createExchange"
+                 << " " << traceLabel
+                 << " driver=" << driverId_
+                 << " processSplits=" << processSplits_;
   }
 }
 

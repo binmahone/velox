@@ -282,6 +282,7 @@ class UcxExchangeSource
   /// @brief Guards exactly-once delivery of the nullptr end-of-stream marker.
   /// Only one thread can win the CAS and call enqueue(nullptr).
   std::atomic<bool> endMarkerDelivered_{false};
+  bool firstDataLogged_{false};
 
   /// @brief True only after addSourceLocked() has been called for this source.
   /// Prevents deliverEndMarker() from incrementing numCompleted_ for sources

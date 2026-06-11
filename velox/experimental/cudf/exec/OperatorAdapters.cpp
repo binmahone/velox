@@ -52,6 +52,8 @@
 #include "velox/exec/TopNRowNumber.h"
 #include "velox/exec/Values.h"
 
+#include <fmt/format.h>
+
 namespace facebook::velox::cudf_velox {
 
 /// OperatorAdapterRegistry Implementation
@@ -818,11 +820,23 @@ class ExchangeAdapter : public OperatorAdapter {
         auto veloxExchangeClient = exchangeOp->releaseExchangeClient();
         VELOX_CHECK_NOT_NULL(
             veloxExchangeClient, "Velox exchange client can't be null.");
+        const auto exchangeTraceEnabled = ctx->queryConfig().get<bool>(
+            "spark.gluten.mpp.exchangeTrace.enabled", false);
+        const auto traceLabel = fmt::format(
+            "consumerTask={} destination={} planNode={} pipeline={} operatorId={}",
+            op->taskId(),
+            veloxExchangeClient->getDestination(),
+            planNode->id(),
+            ctx->pipelineId,
+            operatorId);
         client =
             std::make_shared<facebook::velox::ucx_exchange::UcxExchangeClient>(
                 op->taskId(),
                 veloxExchangeClient->getDestination(),
-                veloxExchangeClient->getNumberOfConsumers());
+                veloxExchangeClient->getNumberOfConsumers(),
+                10,
+                exchangeTraceEnabled,
+                traceLabel);
         clientMap[key] = client;
       } else {
         // Prevent closing of the HTTP ExchangeClient when the replaced

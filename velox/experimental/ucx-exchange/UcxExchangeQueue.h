@@ -19,6 +19,7 @@
 #include <rmm/cuda_stream_view.hpp>
 #include <cinttypes>
 #include <memory>
+#include <string>
 #include "velox/common/base/Exceptions.h"
 #include "velox/common/future/VeloxPromise.h"
 
@@ -47,8 +48,13 @@ using PackedTableWithStreamPtr = std::unique_ptr<PackedTableWithStream>;
 
 class UcxExchangeQueue {
  public:
-  explicit UcxExchangeQueue(int32_t numberOfConsumers)
-      : numberOfConsumers_{numberOfConsumers} {
+  explicit UcxExchangeQueue(
+      int32_t numberOfConsumers,
+      bool traceEnabled = false,
+      std::string traceLabel = "")
+      : numberOfConsumers_{numberOfConsumers},
+        traceEnabled_{traceEnabled},
+        traceLabel_{std::move(traceLabel)} {
     VELOX_CHECK_GE(numberOfConsumers, 1);
   }
 
@@ -135,6 +141,14 @@ class UcxExchangeQueue {
 
   void close();
 
+  bool traceEnabled() const {
+    return traceEnabled_;
+  }
+
+  const std::string& traceLabel() const {
+    return traceLabel_;
+  }
+
  private:
   std::vector<ContinuePromise> closeLocked() {
     queue_.clear();
@@ -182,11 +196,17 @@ class UcxExchangeQueue {
   }
 
   const int32_t numberOfConsumers_;
+  const bool traceEnabled_;
+  const std::string traceLabel_;
 
   int numCompleted_{0};
   int numSources_{0};
   bool noMoreSources_{false};
   bool atEnd_{false};
+  bool firstEnqueueLogged_{false};
+  bool firstDequeueLogged_{false};
+  int64_t emptyWaits_{0};
+  int64_t dequeuedTables_{0};
 
   mutable std::mutex mutex_;
   std::deque<PackedTableWithStreamPtr> queue_;

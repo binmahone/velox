@@ -36,12 +36,17 @@ class UcxExchangeClient
       std::string taskId,
       int destination,
       int32_t numberOfConsumers,
-      int32_t requestDataSizesMaxWaitSec = 10)
+      int32_t requestDataSizesMaxWaitSec = 10,
+      bool traceEnabled = false,
+      std::string traceLabel = "")
       : taskId_{std::move(taskId)},
         destination_(destination),
         maxQueuedColumns_(kDefaultMaxQueuedColumns),
         kRequestDataSizesMaxWaitSec_(requestDataSizesMaxWaitSec),
-        queue_(std::make_shared<UcxExchangeQueue>(numberOfConsumers)) {
+        traceEnabled_(traceEnabled),
+        traceLabel_(std::move(traceLabel)),
+        queue_(std::make_shared<UcxExchangeQueue>(
+            numberOfConsumers, traceEnabled_, traceLabel_)) {
     VELOX_CHECK_GE(
         destination, 0, "Exchange client destination must not be negative");
   }
@@ -95,6 +100,8 @@ class UcxExchangeClient
   const int destination_;
   const int32_t maxQueuedColumns_;
   const std::chrono::seconds kRequestDataSizesMaxWaitSec_;
+  const bool traceEnabled_;
+  const std::string traceLabel_;
 
   const std::shared_ptr<UcxExchangeQueue> queue_;
 

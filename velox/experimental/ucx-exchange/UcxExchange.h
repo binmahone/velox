@@ -84,6 +84,7 @@ class UcxExchange : public SourceOperator, public cudf_velox::NvtxHelper {
   const bool processSplits_;
   const int pipelineId_;
   const int driverId_;
+  const bool exchangeTraceEnabled_;
   bool noMoreSplits_ = false;
 
   // A future received from Task::getSplitOrFuture(). It will be complete when

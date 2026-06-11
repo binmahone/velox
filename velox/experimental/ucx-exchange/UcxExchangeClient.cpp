@@ -17,8 +17,19 @@
 
 #include "velox/common/base/Counters.h"
 #include "velox/common/base/StatsReporter.h"
+#include <chrono>
 
 namespace facebook::velox::ucx_exchange {
+
+namespace {
+
+int64_t steadyMillis() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+} // namespace
 
 void UcxExchangeClient::addRemoteTaskId(const std::string& remoteTaskId) {
   std::shared_ptr<UcxExchangeSource> toClose;
@@ -30,6 +41,14 @@ void UcxExchangeClient::addRemoteTaskId(const std::string& remoteTaskId) {
       // Do not add sources twice. Presto protocol may add duplicate sources
       // and the task updates have no guarantees of arriving in order.
       return;
+    }
+    if (traceEnabled_) {
+      LOG(WARNING) << "MppExchangeTrace event=addRemoteTask"
+                   << " tMs=" << steadyMillis()
+                   << " " << traceLabel_
+                   << " remoteTask=" << remoteTaskId
+                   << " destination=" << destination_
+                   << " remoteTaskCount=" << remoteTaskIds_.size();
     }
 
     std::shared_ptr<UcxExchangeSource> source;
@@ -54,6 +73,13 @@ void UcxExchangeClient::addRemoteTaskId(const std::string& remoteTaskId) {
 
 void UcxExchangeClient::noMoreRemoteTasks() {
   VLOG(3) << "@" << taskId_ << " UcxExchangeClient::noMoreRemoteTasks called.";
+  if (traceEnabled_) {
+    LOG(WARNING) << "MppExchangeTrace event=noMoreRemoteTasks"
+                 << " tMs=" << steadyMillis()
+                 << " " << traceLabel_
+                 << " remoteTaskCount=" << remoteTaskIds_.size()
+                 << " destination=" << destination_;
+  }
   queue_->noMoreSources();
 }
 

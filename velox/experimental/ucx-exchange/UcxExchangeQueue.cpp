@@ -16,14 +16,34 @@
 #include "velox/experimental/ucx-exchange/UcxExchangeQueue.h"
 
 #include <algorithm>
+#include <chrono>
 
 namespace facebook::velox::ucx_exchange {
+
+namespace {
+
+int64_t steadyMillis() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+} // namespace
 
 void UcxExchangeQueue::noMoreSources() {
   std::vector<ContinuePromise> promises;
   {
     std::lock_guard<std::mutex> l(mutex_);
     noMoreSources_ = true;
+    if (traceEnabled_) {
+      LOG(WARNING) << "MppExchangeTrace event=noMoreSources"
+                   << " tMs=" << steadyMillis()
+                   << " " << traceLabel_
+                   << " numSources=" << numSources_
+                   << " numCompleted=" << numCompleted_
+                   << " queuedTables=" << queue_.size()
+                   << " queuedBytes=" << totalBytes_;
+    }
     promises = checkCompleteLocked();
   }
   clearPromises(promises);
@@ -43,6 +63,16 @@ void UcxExchangeQueue::enqueueLocked(
     std::vector<ContinuePromise>& promises) {
   if (data == nullptr) {
     ++numCompleted_;
+    if (traceEnabled_) {
+      LOG(WARNING) << "MppExchangeTrace event=sourceComplete"
+                   << " tMs=" << steadyMillis()
+                   << " " << traceLabel_
+                   << " numCompleted=" << numCompleted_
+                   << " numSources=" << numSources_
+                   << " noMoreSources=" << noMoreSources_
+                   << " queuedTables=" << queue_.size()
+                   << " queuedBytes=" << totalBytes_;
+    }
     VLOG(2) << "[EX-QUEUE] source completed (null enqueued)"
             << " numCompleted=" << numCompleted_
             << " numSources=" << numSources_
@@ -65,6 +95,17 @@ void UcxExchangeQueue::enqueueLocked(
   receivedBytes_ += dataSize;
 
   queue_.push_back(std::move(data));
+  if (traceEnabled_ && !firstEnqueueLogged_) {
+    firstEnqueueLogged_ = true;
+    LOG(WARNING) << "MppExchangeTrace event=firstEnqueue"
+                 << " tMs=" << steadyMillis()
+                 << " " << traceLabel_
+                 << " bytes=" << dataSize
+                 << " receivedTables=" << receivedTables_
+                 << " queuedTables=" << queue_.size()
+                 << " queuedBytes=" << totalBytes_
+                 << " waitingConsumers=" << promises_.size();
+  }
 
   // High-water-mark alerts: log when queue size crosses thresholds.
   auto newSize = static_cast<int64_t>(queue_.size());
@@ -135,6 +176,18 @@ PackedTableWithStreamPtr UcxExchangeQueue::dequeueLocked(
     if (atEnd_) {
       *atEnd = true;
     } else {
+      ++emptyWaits_;
+      if (traceEnabled_ && (emptyWaits_ <= 3 || emptyWaits_ % 100 == 0)) {
+        LOG(WARNING) << "MppExchangeTrace event=emptyWait"
+                     << " tMs=" << steadyMillis()
+                     << " " << traceLabel_
+                     << " consumer=" << consumerId
+                     << " emptyWaits=" << emptyWaits_
+                     << " numSources=" << numSources_
+                     << " numCompleted=" << numCompleted_
+                     << " noMoreSources=" << noMoreSources_
+                     << " waitingConsumers=" << (promises_.size() + 1);
+      }
       VLOG(2) << "[EX-QUEUE] consumer=" << consumerId
               << " blocked (empty queue, waiting for data)"
               << " numSources=" << numSources_
@@ -148,6 +201,19 @@ PackedTableWithStreamPtr UcxExchangeQueue::dequeueLocked(
   data = std::move(queue_.front());
   queue_.pop_front();
   totalBytes_ -= data->gpuDataSize();
+  ++dequeuedTables_;
+  if (traceEnabled_ && !firstDequeueLogged_) {
+    firstDequeueLogged_ = true;
+    LOG(WARNING) << "MppExchangeTrace event=firstDequeue"
+                 << " tMs=" << steadyMillis()
+                 << " " << traceLabel_
+                 << " consumer=" << consumerId
+                 << " bytes=" << data->gpuDataSize()
+                 << " dequeuedTables=" << dequeuedTables_
+                 << " queuedTables=" << queue_.size()
+                 << " queuedBytes=" << totalBytes_
+                 << " emptyWaits=" << emptyWaits_;
+  }
 
   return data;
 }
