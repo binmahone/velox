@@ -26,6 +26,16 @@ using namespace facebook::velox::cudf_velox; // NOLINT
 
 namespace facebook::velox::ucx_exchange {
 
+namespace {
+
+bool isMppExchangeTraceEnabled(const core::QueryConfig& queryConfig) {
+  const auto value = queryConfig.get<std::string>(
+      "spark.gluten.mpp.exchangeTrace.enabled", "false");
+  return value == "true" || value == "1" || value == "TRUE";
+}
+
+} // namespace
+
 // --- Implementation of the UcxExchange operator.
 
 UcxExchange::UcxExchange(
@@ -49,8 +59,8 @@ UcxExchange::UcxExchange(
       processSplits_{driverCtx->driverId == 0},
       pipelineId_{driverCtx->pipelineId},
       driverId_{driverCtx->driverId},
-      exchangeTraceEnabled_{driverCtx->queryConfig().get<bool>(
-          "spark.gluten.mpp.exchangeTrace.enabled", false)} {
+      exchangeTraceEnabled_{isMppExchangeTraceEnabled(
+          driverCtx->queryConfig())} {
   const auto traceLabel = fmt::format(
       "consumerTask={} destination={} planNode={} pipeline={} operatorId={}",
       taskId(),

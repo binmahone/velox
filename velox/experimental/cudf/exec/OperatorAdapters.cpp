@@ -752,6 +752,12 @@ std::mutex& getUcxExchangeClientMapMutex() {
   return instance;
 }
 
+bool isMppExchangeTraceEnabled(const core::QueryConfig& queryConfig) {
+  const auto value = queryConfig.get<std::string>(
+      "spark.gluten.mpp.exchangeTrace.enabled", "false");
+  return value == "true" || value == "1" || value == "TRUE";
+}
+
 /// ExchangeAdapter - Replaces with UcxExchange for UCX transport.
 // Note: When exchange is enabled but transport is HTTP, canRunOnGPU()
 // returns false while keepOperator() returns false. In ToCudf.cpp's
@@ -820,8 +826,8 @@ class ExchangeAdapter : public OperatorAdapter {
         auto veloxExchangeClient = exchangeOp->releaseExchangeClient();
         VELOX_CHECK_NOT_NULL(
             veloxExchangeClient, "Velox exchange client can't be null.");
-        const auto exchangeTraceEnabled = ctx->queryConfig().get<bool>(
-            "spark.gluten.mpp.exchangeTrace.enabled", false);
+        const auto exchangeTraceEnabled =
+            isMppExchangeTraceEnabled(ctx->queryConfig());
         const auto traceLabel = fmt::format(
             "consumerTask={} destination={} planNode={} pipeline={} operatorId={}",
             op->taskId(),
