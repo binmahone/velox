@@ -17,6 +17,7 @@
 #include "velox/experimental/cudf/vector/CudfVector.h"
 
 #include <fmt/format.h>
+#include <chrono>
 
 using facebook::velox::exec::Operator;
 using facebook::velox::exec::RemoteConnectorSplit;
@@ -27,6 +28,12 @@ using namespace facebook::velox::cudf_velox; // NOLINT
 namespace facebook::velox::ucx_exchange {
 
 namespace {
+
+int64_t steadyMillis() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
 
 bool isMppExchangeTraceEnabled(const core::QueryConfig& queryConfig) {
   const auto value = queryConfig.get<std::string>(
@@ -60,14 +67,14 @@ UcxExchange::UcxExchange(
       pipelineId_{driverCtx->pipelineId},
       driverId_{driverCtx->driverId},
       exchangeTraceEnabled_{isMppExchangeTraceEnabled(
-          driverCtx->queryConfig())} {
-  const auto traceLabel = fmt::format(
-      "consumerTask={} destination={} planNode={} pipeline={} operatorId={}",
-      taskId(),
-      driverCtx->task->destination(),
-      planNode->id(),
-      pipelineId_,
-      operatorId);
+          driverCtx->queryConfig())},
+      traceLabel_(fmt::format(
+          "consumerTask={} destination={} planNode={} pipeline={} operatorId={}",
+          taskId(),
+          driverCtx->task->destination(),
+          planNode->id(),
+          pipelineId_,
+          operatorId)) {
   if (ucxExchangeClient) {
     // UcxExchangeClient is provided externally when this is a "plain"
     // UcxExchange.
@@ -82,12 +89,12 @@ UcxExchange::UcxExchange(
         1, // number of consumers, is always 1.
         10,
         exchangeTraceEnabled_,
-        traceLabel
+        traceLabel_
     );
   }
   if (exchangeTraceEnabled_ && processSplits_) {
     LOG(WARNING) << "MppExchangeTrace event=createExchange"
-                 << " " << traceLabel
+                 << " " << traceLabel_
                  << " driver=" << driverId_
                  << " processSplits=" << processSplits_;
   }
@@ -163,6 +170,16 @@ void UcxExchange::getSplits(ContinueFuture* future) {
 BlockingReason UcxExchange::isBlocked(ContinueFuture* future) {
   VELOX_NVTX_OPERATOR_FUNC_RANGE();
   if (currentData_ || atEnd_) {
+    if (exchangeTraceEnabled_ && atEnd_ && !currentData_ && !endLogged_) {
+      endLogged_ = true;
+      LOG(WARNING) << "MppExchangeTrace event=consumerAtEnd"
+                   << " tMs=" << steadyMillis()
+                   << " " << traceLabel_
+                   << " driver=" << driverId_
+                   << " outputs=" << outputTables_
+                   << " rows=" << outputRows_
+                   << " bytes=" << outputBytes_;
+    }
     return BlockingReason::kNotBlocked;
   }
 
@@ -180,6 +197,16 @@ BlockingReason UcxExchange::isBlocked(ContinueFuture* future) {
       operatorCtx_->task()->multipleSplitsFinished(false, numSplits, 0);
     }
     recordExchangeClientStats();
+    if (exchangeTraceEnabled_ && atEnd_ && !currentData_ && !endLogged_) {
+      endLogged_ = true;
+      LOG(WARNING) << "MppExchangeTrace event=consumerAtEnd"
+                   << " tMs=" << steadyMillis()
+                   << " " << traceLabel_
+                   << " driver=" << driverId_
+                   << " outputs=" << outputTables_
+                   << " rows=" << outputRows_
+                   << " bytes=" << outputBytes_;
+    }
     return BlockingReason::kNotBlocked;
   }
 
@@ -218,6 +245,22 @@ RowVectorPtr UcxExchange::getOutputFromPackedTable() {
       pool(), outputType_, numRows, std::move(data.packedTable), data.stream);
 
   recordInputStats(gpuDataSize, result);
+  ++outputTables_;
+  outputRows_ += numRows;
+  outputBytes_ += gpuDataSize;
+  if (exchangeTraceEnabled_ &&
+      (!firstOutputLogged_ || outputTables_ % 1000 == 0)) {
+    firstOutputLogged_ = true;
+    LOG(WARNING) << "MppExchangeTrace event=consumerOutput"
+                 << " tMs=" << steadyMillis()
+                 << " " << traceLabel_
+                 << " driver=" << driverId_
+                 << " output=" << outputTables_
+                 << " rows=" << numRows
+                 << " bytes=" << gpuDataSize
+                 << " totalRows=" << outputRows_
+                 << " totalBytes=" << outputBytes_;
+  }
   // free the memory owned by PackedTableWithStream and set it to nullptr;
   currentData_.reset();
 

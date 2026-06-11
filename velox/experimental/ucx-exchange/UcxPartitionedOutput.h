@@ -93,6 +93,8 @@ class UcxPartitionedOutput : public exec::Operator,
 
   const int pipelineId_;
   const int driverId_;
+  const bool exchangeTraceEnabled_;
+  const std::string traceLabel_;
 
   exec::BlockingReason blockingReason_;
   ContinueFuture future_;
@@ -113,6 +115,9 @@ class UcxPartitionedOutput : public exec::Operator,
   int64_t pendingRows_{0};
   /// Configured row threshold for flushing (from QueryConfig).
   const int64_t targetRowsPerChunk_;
+  int64_t flushCount_{0};
+  int64_t enqueueCount_{0};
+  std::vector<int64_t> destinationEnqueueCounts_;
 };
 
 } // namespace facebook::velox::ucx_exchange

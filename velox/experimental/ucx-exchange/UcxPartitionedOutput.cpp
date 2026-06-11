@@ -16,6 +16,7 @@
 #include "velox/experimental/ucx-exchange/UcxPartitionedOutput.h"
 #include <fmt/format.h>
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include "velox/core/PlanNode.h"
 #include "velox/core/QueryConfig.h"
@@ -33,6 +34,22 @@
 using namespace facebook::velox::cudf_velox;
 using facebook::velox::exec::Task;
 namespace facebook::velox::ucx_exchange {
+
+namespace {
+
+int64_t steadyMillis() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+bool isMppExchangeTraceEnabled(const core::QueryConfig& queryConfig) {
+  const auto value = queryConfig.get<std::string>(
+      "spark.gluten.mpp.exchangeTrace.enabled", "false");
+  return value == "true" || value == "1" || value == "TRUE";
+}
+
+} // namespace
 
 // Computes a mapping from names in n2 to names in n1
 // and returns that mapping in remap.
@@ -72,7 +89,17 @@ UcxPartitionedOutput::UcxPartitionedOutput(
       numPartitions_(planNode->numPartitions()),
       pipelineId_(ctx->pipelineId),
       driverId_(ctx->driverId),
-      targetRowsPerChunk_(ctx->queryConfig().ucxPartitionedOutputBatchRows()) {
+      exchangeTraceEnabled_{isMppExchangeTraceEnabled(ctx->queryConfig())},
+      traceLabel_(fmt::format(
+          "producerTask={} planNode={} pipeline={} driver={} operatorId={} destinations={}",
+          ctx->task->taskId(),
+          planNode->id(),
+          ctx->pipelineId,
+          ctx->driverId,
+          operatorId,
+          planNode->numPartitions())),
+      targetRowsPerChunk_(ctx->queryConfig().ucxPartitionedOutputBatchRows()),
+      destinationEnqueueCounts_(planNode->numPartitions(), 0) {
   if (driverId_ == 0) {
     const auto numDrivers = ctx->task->numOutputDrivers();
     sharedQueueManager()->initializeTask(
@@ -85,6 +112,14 @@ UcxPartitionedOutput::UcxPartitionedOutput(
             << " drivers=" << numDrivers
             << " kind=" << core::PartitionedOutputNode::toName(planNode->kind())
             << " targetRowsPerChunk=" << targetRowsPerChunk_;
+  }
+  if (exchangeTraceEnabled_) {
+    LOG(WARNING) << "MppExchangeTrace event=createPartitionedOutput"
+                 << " tMs=" << steadyMillis()
+                 << " " << traceLabel_
+                 << " kind="
+                 << core::PartitionedOutputNode::toName(planNode->kind())
+                 << " targetRowsPerChunk=" << targetRowsPerChunk_;
   }
   this->initPartitionKeys(planNode);
   auto sources = planNode->sources();
@@ -132,6 +167,15 @@ void UcxPartitionedOutput::flushPending() {
   }
 
   try {
+    ++flushCount_;
+    if (exchangeTraceEnabled_) {
+      LOG(WARNING) << "MppExchangeTrace event=producerFlushStart"
+                   << " tMs=" << steadyMillis()
+                   << " " << traceLabel_
+                   << " flush=" << flushCount_
+                   << " inputBatches=" << pendingInputs_.size()
+                   << " inputRows=" << pendingRows_;
+    }
     cudf::table_view tableView;
     rmm::cuda_stream_view stream = pendingInputs_.back()->stream();
     // Keeps the merged table alive while tableView references it.
@@ -201,6 +245,20 @@ void UcxPartitionedOutput::flushPending() {
       stream.synchronize();
       auto packedColsPtr = std::make_unique<cudf::packed_columns>(
           std::move(packedCols.metadata), std::move(packedCols.gpu_data));
+      if (exchangeTraceEnabled_) {
+        ++enqueueCount_;
+        ++destinationEnqueueCounts_[0];
+        LOG(WARNING) << "MppExchangeTrace event=producerEnqueue"
+                     << " tMs=" << steadyMillis()
+                     << " " << traceLabel_
+                     << " flush=" << flushCount_
+                     << " enqueue=" << enqueueCount_
+                     << " destination=0"
+                     << " destinationEnqueue="
+                     << destinationEnqueueCounts_[0]
+                     << " rows=" << tableRows
+                     << " bytes=" << packedColsPtr->gpu_data->size();
+      }
       queueManager->enqueue(
           this->taskId(), 0, std::move(packedColsPtr), tableRows);
     }
@@ -213,6 +271,14 @@ void UcxPartitionedOutput::flushPending() {
     }
     blockingReason_ = blocked ? exec::BlockingReason::kWaitForConsumer
                               : exec::BlockingReason::kNotBlocked;
+    if (exchangeTraceEnabled_) {
+      LOG(WARNING) << "MppExchangeTrace event=producerFlushEnd"
+                   << " tMs=" << steadyMillis()
+                   << " " << traceLabel_
+                   << " flush=" << flushCount_
+                   << " blocked=" << blocked
+                   << " totalEnqueues=" << enqueueCount_;
+    }
 
     pendingInputs_.clear();
     pendingRows_ = 0;
@@ -246,6 +312,13 @@ RowVectorPtr UcxPartitionedOutput::getOutput() {
   }
   if (noMoreInput_) {
     flushPending(); // drain any remaining buffered inputs
+    if (exchangeTraceEnabled_) {
+      LOG(WARNING) << "MppExchangeTrace event=producerNoMoreData"
+                   << " tMs=" << steadyMillis()
+                   << " " << traceLabel_
+                   << " flushes=" << flushCount_
+                   << " enqueues=" << enqueueCount_;
+    }
     sharedQueueManager()->noMoreData(this->taskId());
     finished_ = true;
   }
@@ -425,6 +498,20 @@ void UcxPartitionedOutput::splitAndEnqueue(
         stream.synchronize();
         auto packedColsPtr = std::make_unique<cudf::packed_columns>(
             std::move(packedCols.metadata), std::move(packedCols.gpu_data));
+        if (exchangeTraceEnabled_) {
+          ++enqueueCount_;
+          ++destinationEnqueueCounts_[i];
+          LOG(WARNING) << "MppExchangeTrace event=producerEnqueue"
+                       << " tMs=" << steadyMillis()
+                       << " " << traceLabel_
+                       << " flush=" << flushCount_
+                       << " enqueue=" << enqueueCount_
+                       << " destination=" << i
+                       << " destinationEnqueue="
+                       << destinationEnqueueCounts_[i]
+                       << " rows=" << slicedTables[0].num_rows()
+                       << " bytes=" << packedColsPtr->gpu_data->size();
+        }
         queueManager->enqueue(
             this->taskId(),
             i,
@@ -439,6 +526,19 @@ void UcxPartitionedOutput::splitAndEnqueue(
         std::move(contiguousTables[i].data.gpu_data));
 
     // enqueue partition data on Ucx Output Buffer
+    if (exchangeTraceEnabled_) {
+      ++enqueueCount_;
+      ++destinationEnqueueCounts_[i];
+      LOG(WARNING) << "MppExchangeTrace event=producerEnqueue"
+                   << " tMs=" << steadyMillis()
+                   << " " << traceLabel_
+                   << " flush=" << flushCount_
+                   << " enqueue=" << enqueueCount_
+                   << " destination=" << i
+                   << " destinationEnqueue=" << destinationEnqueueCounts_[i]
+                   << " rows=" << partitionTable.table.num_rows()
+                   << " bytes=" << packedColsPtr->gpu_data->size();
+    }
     queueManager->enqueue(
         this->taskId(),
         i,
