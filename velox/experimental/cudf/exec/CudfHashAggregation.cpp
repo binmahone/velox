@@ -44,6 +44,7 @@
 
 #include <fmt/format.h>
 
+#include <new>
 #include <vector>
 
 namespace {
@@ -1635,13 +1636,38 @@ CudfVectorPtr CudfHashAggregation::doGroupByAggregation(
             value,
             RuntimeCounter::Unit::kNanos);
       };
-  auto output = std::make_shared<cudf_velox::CudfVector>(
-      pool(),
-      outputType,
-      numRows,
-      std::move(resultTable),
-      stream,
-      std::move(vectorStatRecorder));
+  const auto vectorAllocStart = Clock::now();
+  void* outputMemory = ::operator new(sizeof(cudf_velox::CudfVector));
+  recordRuntimeTiming(
+      "cudfHashAggGroupByMakeVectorObjectAllocNanos", vectorAllocStart);
+
+  cudf_velox::CudfVector* rawOutput = nullptr;
+  try {
+    const auto vectorConstructorStart = Clock::now();
+    rawOutput = new (outputMemory) cudf_velox::CudfVector(
+        pool(),
+        outputType,
+        numRows,
+        std::move(resultTable),
+        stream,
+        std::move(vectorStatRecorder));
+    recordRuntimeTiming(
+        "cudfHashAggGroupByMakeVectorConstructorNanos",
+        vectorConstructorStart);
+  } catch (...) {
+    ::operator delete(outputMemory);
+    throw;
+  }
+
+  const auto vectorSharedPtrStart = Clock::now();
+  auto output = cudf_velox::CudfVectorPtr(
+      rawOutput,
+      [](cudf_velox::CudfVector* ptr) {
+        ptr->~CudfVector();
+        ::operator delete(ptr);
+      });
+  recordRuntimeTiming(
+      "cudfHashAggGroupByMakeVectorSharedPtrNanos", vectorSharedPtrStart);
   recordRuntimeTiming("cudfHashAggGroupByMakeVectorNanos", vectorWrapStart);
 
   const auto resultsClearStart = Clock::now();
