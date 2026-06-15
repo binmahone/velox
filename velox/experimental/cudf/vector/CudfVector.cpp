@@ -165,9 +165,18 @@ CudfVector::CudfVector(
           size,
           std::vector<VectorPtr>(),
           std::nullopt),
-      tableStorage_{std::move(table)},
       stream_{stream} {
+  const auto bodyStart = Clock::now();
+  const auto tableStorageStart = Clock::now();
+  tableStorage_.emplace<std::unique_ptr<cudf::table>>(std::move(table));
+  recordRuntimeTiming(
+      runtimeStatRecorder, "TableStorageEmplaceNanos", tableStorageStart);
+  const auto defaultStreamCheckStart = Clock::now();
   logDefaultStreamIfNeeded(stream_, "CudfVector(table)");
+  recordRuntimeTiming(
+      runtimeStatRecorder,
+      "DefaultStreamCheckNanos",
+      defaultStreamCheckStart);
   auto& tablePtr = std::get<std::unique_ptr<cudf::table>>(tableStorage_);
   const auto tableSizeStart = Clock::now();
   auto [bytes, tableOut] =
@@ -179,6 +188,7 @@ CudfVector::CudfVector(
   const auto viewStart = Clock::now();
   tabView_ = tablePtr->view();
   recordRuntimeTiming(runtimeStatRecorder, "TableViewNanos", viewStart);
+  recordRuntimeTiming(runtimeStatRecorder, "BodyTotalNanos", bodyStart);
 }
 
 CudfVector::CudfVector(
