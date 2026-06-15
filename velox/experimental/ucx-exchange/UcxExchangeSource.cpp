@@ -37,6 +37,10 @@ int64_t steadyMillis() {
       .count();
 }
 
+bool isDefaultCudaStream(rmm::cuda_stream_view stream) {
+  return stream.value() == rmm::cuda_stream_default.value();
+}
+
 } // namespace
 
 void UcxExchangeSource::setState(ReceiverState newState) {
@@ -837,6 +841,17 @@ void UcxExchangeSource::onIntraNodeData(
   // destinations. Keep the zero-copy path for uniquely owned partitioned
   // pages, but clone shared pages before moving out of them.
   const bool sharedPage = data.use_count() > 1;
+  if (isDefaultCudaStream(producerStream)) {
+    LOG(WARNING) << "CudfDefaultStreamProvenance"
+                 << " site=UcxExchangeSource.onIntraNodeData"
+                 << " " << queue_->traceLabel()
+                 << " localTask=" << taskId_
+                 << " remoteTask=" << partitionKey_.taskId
+                 << " destination=" << partitionKey_.destination
+                 << " seq=" << sequenceNumber_
+                 << " bytes=" << data->gpu_data->size()
+                 << " sharedPage=" << sharedPage;
+  }
   // The received device buffer was allocated on `producerStream`, and with the
   // stream-ordered async MR its cudaFreeAsync stays bound to that stream. For
   // the uniquely-owned (partitioned) page we MOVE the buffer out, so tag the

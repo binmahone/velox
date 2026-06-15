@@ -284,6 +284,14 @@ void UcxExchangeServer::sendData() {
       // Stream value is unused: the consumer (UcxExchangeSource::
       // onIntraNodeData) allocates its own pool stream for downstream ops.
       // dataPtr_ is already a shared_ptr, pass directly to share ownership.
+      LOG(WARNING) << "CudfDefaultStreamProvenance"
+                   << " site=UcxExchangeServer.sendData"
+                   << " task=" << partitionKey_.taskId
+                   << " destination=" << partitionKey_.destination
+                   << " seq=" << sequenceNumber_
+                   << " bytes=" << bytes_
+                   << " intraNode=true"
+                   << " publishedStream=default";
       intraNodeRetrieveFuture_ =
           IntraNodeTransferRegistry::getInstance()->publish(
               key, dataPtr_, rmm::cuda_stream_default, /*atEnd=*/false);

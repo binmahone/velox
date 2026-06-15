@@ -49,6 +49,10 @@ bool isMppExchangeTraceEnabled(const core::QueryConfig& queryConfig) {
   return value == "true" || value == "1" || value == "TRUE";
 }
 
+bool isDefaultCudaStream(rmm::cuda_stream_view stream) {
+  return stream.value() == rmm::cuda_stream_default.value();
+}
+
 } // namespace
 
 // Computes a mapping from names in n2 to names in n1
@@ -178,6 +182,12 @@ void UcxPartitionedOutput::flushPending() {
     }
     cudf::table_view tableView;
     rmm::cuda_stream_view stream = pendingInputs_.back()->stream();
+    int64_t defaultInputStreams = 0;
+    for (const auto& input : pendingInputs_) {
+      if (isDefaultCudaStream(input->stream())) {
+        ++defaultInputStreams;
+      }
+    }
     // Keeps the merged table alive while tableView references it.
     std::unique_ptr<cudf::table> mergedTable;
 
@@ -229,6 +239,17 @@ void UcxPartitionedOutput::flushPending() {
       pendingInputs_.clear();
 
       tableView = mergedTable->view();
+    }
+    if (isDefaultCudaStream(stream)) {
+      ++defaultStreamFlushes_;
+      LOG(WARNING) << "CudfDefaultStreamProvenance"
+                   << " site=UcxPartitionedOutput.flushPending"
+                   << " count=" << defaultStreamFlushes_
+                   << " " << traceLabel_
+                   << " flush=" << flushCount_
+                   << " pendingInputs=" << pendingInputs_.size()
+                   << " defaultInputStreams=" << defaultInputStreams
+                   << " inputRows=" << pendingRows_;
     }
 
     // Partition + enqueue (identical to previous addInput logic).

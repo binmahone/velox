@@ -117,6 +117,7 @@ class UcxPartitionedOutput : public exec::Operator,
   const int64_t targetRowsPerChunk_;
   int64_t flushCount_{0};
   int64_t enqueueCount_{0};
+  int64_t defaultStreamFlushes_{0};
   std::vector<int64_t> destinationEnqueueCounts_;
 };
 

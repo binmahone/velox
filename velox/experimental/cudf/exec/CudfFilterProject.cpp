@@ -40,6 +40,10 @@ namespace facebook::velox::cudf_velox {
 
 namespace {
 
+bool isDefaultCudaStream(rmm::cuda_stream_view stream) {
+  return stream.value() == rmm::cuda_stream_default.value();
+}
+
 void debugPrintTree(
     const std::shared_ptr<velox::exec::Expr>& expr,
     int indent = 0,
@@ -248,6 +252,21 @@ RowVectorPtr CudfFilterProject::getOutput() {
   auto cudfInput = std::dynamic_pointer_cast<CudfVector>(input_);
   VELOX_CHECK_NOT_NULL(cudfInput);
   auto stream = cudfInput->stream();
+  if (isDefaultCudaStream(stream)) {
+    ++defaultStreamOutputs_;
+    LOG(WARNING) << "CudfDefaultStreamProvenance"
+                 << " site=CudfFilterProject.getOutput"
+                 << " count=" << defaultStreamOutputs_
+                 << " task=" << taskId()
+                 << " planNode=" << planNodeId()
+                 << " operatorId=" << operatorId()
+                 << " pipeline=" << operatorCtx_->driverCtx()->pipelineId
+                 << " driver=" << operatorCtx_->driverCtx()->driverId
+                 << " rows=" << cudfInput->getTableView().num_rows()
+                 << " columns=" << cudfInput->getTableView().num_columns()
+                 << " filter=" << hasFilter_
+                 << " project=" << projectEvaluators_.size();
+  }
   ScopedGpuMemoryOperatorContext gpuMemoryAttribution(
       fmt::format(
           "CudfFilterProject[node={},op={},pipeline={},driver={},phase=get_output,rows={},columns={},filter={},project={}]",

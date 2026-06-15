@@ -41,6 +41,10 @@ bool isMppExchangeTraceEnabled(const core::QueryConfig& queryConfig) {
   return value == "true" || value == "1" || value == "TRUE";
 }
 
+bool isDefaultCudaStream(rmm::cuda_stream_view stream) {
+  return stream.value() == rmm::cuda_stream_default.value();
+}
+
 } // namespace
 
 // --- Implementation of the UcxExchange operator.
@@ -238,6 +242,16 @@ RowVectorPtr UcxExchange::getOutputFromPackedTable() {
   PackedTableWithStream& data = *currentData_;
   auto numRows = data.packedTable->table.num_rows();
   auto gpuDataSize = data.gpuDataSize();
+  if (isDefaultCudaStream(data.stream)) {
+    ++defaultStreamOutputs_;
+    LOG(WARNING) << "CudfDefaultStreamProvenance"
+                 << " site=UcxExchange.getOutputFromPackedTable"
+                 << " count=" << defaultStreamOutputs_
+                 << " " << traceLabel_
+                 << " output=" << (outputTables_ + 1)
+                 << " rows=" << numRows
+                 << " bytes=" << gpuDataSize;
+  }
 
   // Use the stream that was allocated in UcxExchangeSource::onMetadata
   // and the packed_table constructor of CudfVector to avoid copying data.

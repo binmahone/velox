@@ -89,6 +89,7 @@ class UcxExchange : public SourceOperator, public cudf_velox::NvtxHelper {
   bool noMoreSplits_ = false;
   bool firstOutputLogged_ = false;
   bool endLogged_ = false;
+  int64_t defaultStreamOutputs_ = 0;
   int64_t outputTables_ = 0;
   int64_t outputRows_ = 0;
   int64_t outputBytes_ = 0;
