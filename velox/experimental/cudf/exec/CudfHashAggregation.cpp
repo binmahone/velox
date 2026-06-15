@@ -1549,15 +1549,6 @@ CudfVectorPtr CudfHashAggregation::doGroupByAggregation(
 
   size_t const numGroupingKeys = groupbyKeyView.num_columns();
 
-  // TODO: All other args to groupby are related to sort groupby. We don't
-  // support optimizations related to it yet.
-  const auto ctorStart = Clock::now();
-  cudf::groupby::groupby groupByOwner(
-      groupbyKeyView,
-      ignoreNullKeys_ ? cudf::null_policy::EXCLUDE
-                      : cudf::null_policy::INCLUDE);
-  recordRuntimeTiming("cudfHashAggGroupByCtorNanos", ctorStart);
-
   const auto requestStart = Clock::now();
   std::vector<cudf::groupby::aggregation_request> requests;
   for (auto& aggregator : aggregators) {
@@ -1566,10 +1557,30 @@ CudfVectorPtr CudfHashAggregation::doGroupByAggregation(
   recordRuntimeTiming("cudfHashAggGroupByRequestBuildNanos", requestStart);
   recordRuntimeStat("cudfHashAggGroupByRequests", requests.size());
 
-  const auto aggregateStart = Clock::now();
-  auto [groupKeys, results] =
-      groupByOwner.aggregate(requests, stream, get_output_mr());
-  recordRuntimeTiming("cudfHashAggGroupByAggregateNanos", aggregateStart);
+  std::unique_ptr<cudf::table> groupKeys;
+  std::vector<cudf::groupby::aggregation_result> results;
+  Clock::time_point groupByOwnerDestroyStart;
+  {
+    // TODO: All other args to groupby are related to sort groupby. We don't
+    // support optimizations related to it yet.
+    const auto ctorStart = Clock::now();
+    cudf::groupby::groupby groupByOwner(
+        groupbyKeyView,
+        ignoreNullKeys_ ? cudf::null_policy::EXCLUDE
+                        : cudf::null_policy::INCLUDE);
+    recordRuntimeTiming("cudfHashAggGroupByCtorNanos", ctorStart);
+
+    const auto aggregateStart = Clock::now();
+    auto aggregateResult =
+        groupByOwner.aggregate(requests, stream, get_output_mr());
+    groupKeys = std::move(aggregateResult.first);
+    results = std::move(aggregateResult.second);
+    recordRuntimeTiming("cudfHashAggGroupByAggregateNanos", aggregateStart);
+
+    groupByOwnerDestroyStart = Clock::now();
+  }
+  recordRuntimeTiming(
+      "cudfHashAggGroupByOwnerDestroyNanos", groupByOwnerDestroyStart);
   // flatten the results
   std::vector<std::unique_ptr<cudf::column>> resultColumns;
 
@@ -1600,11 +1611,36 @@ CudfVectorPtr CudfHashAggregation::doGroupByAggregation(
 
   // velox expects nullptr instead of a table with 0 rows
   if (numRows == 0) {
+    const auto emptyOutputResetStart = Clock::now();
+    resultTable.reset();
+    recordRuntimeTiming(
+        "cudfHashAggGroupByEmptyOutputTableResetNanos",
+        emptyOutputResetStart);
+    const auto resultsClearStart = Clock::now();
+    results.clear();
+    recordRuntimeTiming(
+        "cudfHashAggGroupByResultsClearNanos", resultsClearStart);
+    const auto requestsClearStart = Clock::now();
+    requests.clear();
+    recordRuntimeTiming(
+        "cudfHashAggGroupByRequestsClearNanos", requestsClearStart);
     return nullptr;
   }
 
-  return std::make_shared<cudf_velox::CudfVector>(
+  const auto vectorWrapStart = Clock::now();
+  auto output = std::make_shared<cudf_velox::CudfVector>(
       pool(), outputType, numRows, std::move(resultTable), stream);
+  recordRuntimeTiming("cudfHashAggGroupByMakeVectorNanos", vectorWrapStart);
+
+  const auto resultsClearStart = Clock::now();
+  results.clear();
+  recordRuntimeTiming("cudfHashAggGroupByResultsClearNanos", resultsClearStart);
+  const auto requestsClearStart = Clock::now();
+  requests.clear();
+  recordRuntimeTiming(
+      "cudfHashAggGroupByRequestsClearNanos", requestsClearStart);
+
+  return output;
 }
 
 CudfVectorPtr CudfHashAggregation::doGlobalAggregation(
