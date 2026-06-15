@@ -1126,7 +1126,36 @@ void CudfHashAggregation::setupGroupingKeyChannelProjections(
       groupingKeyOutputChannels.begin(), groupingKeyOutputChannels.end(), 0);
 }
 
+void CudfHashAggregation::recordRuntimeStat(
+    std::string_view name,
+    int64_t value,
+    RuntimeCounter::Unit unit) {
+  stats_.wlock()->addRuntimeStat(name, RuntimeCounter(value, unit));
+}
+
+void CudfHashAggregation::recordRuntimeTiming(
+    std::string_view name,
+    Clock::time_point start) {
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  recordRuntimeStat(
+      name,
+      std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count(),
+      RuntimeCounter::Unit::kNanos);
+}
+
+CudfHashAggregation::ScopedRuntimeStat::ScopedRuntimeStat(
+    CudfHashAggregation* op,
+    std::string_view name)
+    : op_(op), name_(name), start_(Clock::now()) {}
+
+CudfHashAggregation::ScopedRuntimeStat::~ScopedRuntimeStat() {
+  op_->recordRuntimeTiming(name_, start_);
+}
+
 void CudfHashAggregation::computePartialGroupbyStreaming(CudfVectorPtr tbl) {
+  ScopedRuntimeStat scope(this, "cudfHashAggPartialGroupbyStreamingTotalNanos");
+  recordRuntimeStat("cudfHashAggPartialGroupbyStreamingInputRows", tbl->size());
+
   // For every input, we'll do a groupby and compact results with the existing
   // intermediate groupby results.
   auto inputTableStream = tbl->stream();
@@ -1165,8 +1194,13 @@ void CudfHashAggregation::computePartialGroupbyStreaming(CudfVectorPtr tbl) {
         std::vector<rmm::cuda_stream_view>{inputTableStream},
         partialOutputStream);
 
+    const auto concatStart = Clock::now();
     auto concatenatedTable =
         cudf::concatenate(tablesToConcat, partialOutputStream, get_output_mr());
+    recordRuntimeTiming("cudfHashAggPartialGroupbyConcatNanos", concatStart);
+    recordRuntimeStat(
+        "cudfHashAggPartialGroupbyConcatRows",
+        concatenatedTable->num_rows());
 
     // Order the input batch's deallocation after the concatenate read. The
     // concat reads groupbyOnInput (produced on inputTableStream) on
@@ -1174,21 +1208,32 @@ void CudfHashAggregation::computePartialGroupbyStreaming(CudfVectorPtr tbl) {
     // its stream-ordered async free can let cudaMallocAsync recycle the block
     // while the concat is still reading it (cudaErrorIllegalAddress).
     CudaEvent concatEvent(cudaEventDisableTiming);
+    const auto streamOrderStart = Clock::now();
     streamsWaitForStream(
         concatEvent,
         std::vector<rmm::cuda_stream_view>{inputTableStream},
         partialOutputStream);
+    recordRuntimeTiming(
+        "cudfHashAggPartialGroupbyStreamOrderNanos", streamOrderStart);
 
     // Now we have to groupby again but this time with intermediate aggregators.
     // Keep concatenatedTable alive while we use its view.
+    const auto mergeStart = Clock::now();
     auto compactedOutput = doGroupByAggregation(
         concatenatedTable->view(),
         groupingKeyOutputChannels_,
         intermediateAggregators_,
         bufferedResultType_,
         partialOutputStream);
+    recordRuntimeTiming(
+        "cudfHashAggPartialGroupbyMergeGroupByNanos", mergeStart);
     bufferedResult_ = compactedOutput;
     partialCumulativeInputRows_ += groupbyOnInput->size();
+    if (bufferedResult_) {
+      recordRuntimeStat(
+          "cudfHashAggPartialGroupbyBufferedRowsAfter",
+          bufferedResult_->size());
+    }
 
     // Convergence detection: after each cross-batch merge, check whether
     // bufferedResult_ is compacting relative to cumulative small input.
@@ -1218,10 +1263,15 @@ void CudfHashAggregation::computePartialGroupbyStreaming(CudfVectorPtr tbl) {
     // This means we're storing the stream from the first batch.
     bufferedResult_ = groupbyOnInput;
     partialCumulativeInputRows_ += groupbyOnInput->size();
+    recordRuntimeStat(
+        "cudfHashAggPartialGroupbyBufferedRowsAfter", bufferedResult_->size());
   }
 }
 
 void CudfHashAggregation::computePartialDistinctStreaming(CudfVectorPtr tbl) {
+  ScopedRuntimeStat scope(this, "cudfHashAggPartialDistinctStreamingTotalNanos");
+  recordRuntimeStat("cudfHashAggPartialDistinctStreamingInputRows", tbl->size());
+
   // For every input, we'll concat with existing distinct results and then do a
   // distinct on the concatenated results.
 
@@ -1241,8 +1291,10 @@ void CudfHashAggregation::computePartialDistinctStreaming(CudfVectorPtr tbl) {
         std::vector<rmm::cuda_stream_view>{inputTableStream},
         partialOutputStream);
 
+    const auto concatStart = Clock::now();
     auto concatenatedTable =
         cudf::concatenate(tablesToConcat, partialOutputStream, get_output_mr());
+    recordRuntimeTiming("cudfHashAggPartialDistinctConcatNanos", concatStart);
 
     // Order the input batch's deallocation after the concatenate read. The
     // concat reads tbl (produced on inputTableStream) on partialOutputStream;
@@ -1250,17 +1302,23 @@ void CudfHashAggregation::computePartialDistinctStreaming(CudfVectorPtr tbl) {
     // async free can let cudaMallocAsync recycle the block while the concat is
     // still reading it (cudaErrorIllegalAddress).
     CudaEvent concatEvent(cudaEventDisableTiming);
+    const auto streamOrderStart = Clock::now();
     streamsWaitForStream(
         concatEvent,
         std::vector<rmm::cuda_stream_view>{inputTableStream},
         partialOutputStream);
+    recordRuntimeTiming(
+        "cudfHashAggPartialDistinctStreamOrderNanos", streamOrderStart);
 
     // Do a distinct on the concatenated results.
     // Keep concatenatedTable alive while we use its view.
+    const auto distinctStart = Clock::now();
     auto distinctOutput = getDistinctKeys(
         concatenatedTable->view(),
         groupingKeyOutputChannels_,
         partialOutputStream);
+    recordRuntimeTiming(
+        "cudfHashAggPartialDistinctDistinctNanos", distinctStart);
     bufferedResult_ = distinctOutput;
   } else {
     // First time processing, just store the result of the input batch's
@@ -1272,34 +1330,52 @@ void CudfHashAggregation::computePartialDistinctStreaming(CudfVectorPtr tbl) {
 }
 
 void CudfHashAggregation::computeFinalGroupbyStreaming(CudfVectorPtr tbl) {
+  ScopedRuntimeStat scope(this, "cudfHashAggFinalGroupbyStreamingTotalNanos");
+  recordRuntimeStat("cudfHashAggFinalGroupbyStreamingInputRows", tbl->size());
+
   auto inputTableStream = tbl->stream();
   auto permutedInputView = tbl->getTableView().select(
       aggregationInputChannels_.begin(), aggregationInputChannels_.end());
 
   if (!bufferedResult_) {
+    const auto firstGroupByStart = Clock::now();
     auto groupbyOnInput = doGroupByAggregation(
         permutedInputView,
         groupingKeyOutputChannels_,
         intermediateAggregators_,
         bufferedResultType_,
         inputTableStream);
+    recordRuntimeTiming(
+        "cudfHashAggFinalGroupbyFirstGroupByNanos", firstGroupByStart);
     if (!groupbyOnInput) {
       return;
     }
     bufferedResult_ = groupbyOnInput;
+    recordRuntimeStat(
+        "cudfHashAggFinalGroupbyBufferedRowsAfter", bufferedResult_->size());
     return;
   }
+
+  recordRuntimeStat(
+      "cudfHashAggFinalGroupbyBufferedRowsBefore", bufferedResult_->size());
 
   std::vector<cudf::table_view> tablesToConcat;
   tablesToConcat.push_back(bufferedResult_->getTableView());
   tablesToConcat.push_back(permutedInputView);
 
   auto finalStream = bufferedResult_->stream();
+  const auto joinStreamsStart = Clock::now();
   cudf::detail::join_streams(
       std::vector<rmm::cuda_stream_view>{inputTableStream}, finalStream);
+  recordRuntimeTiming(
+      "cudfHashAggFinalGroupbyJoinStreamsNanos", joinStreamsStart);
 
+  const auto concatStart = Clock::now();
   auto concatenatedTable =
       cudf::concatenate(tablesToConcat, finalStream, get_temp_mr());
+  recordRuntimeTiming("cudfHashAggFinalGroupbyConcatNanos", concatStart);
+  recordRuntimeStat(
+      "cudfHashAggFinalGroupbyConcatRows", concatenatedTable->num_rows());
 
   // Order the input batch's deallocation after the concatenate read. The concat
   // reads tbl (produced on inputTableStream) on finalStream; without making
@@ -1307,21 +1383,33 @@ void CudfHashAggregation::computeFinalGroupbyStreaming(CudfVectorPtr tbl) {
   // cudaMallocAsync recycle the block while the concat is still reading it
   // (cudaErrorIllegalAddress).
   CudaEvent concatEvent(cudaEventDisableTiming);
+  const auto streamOrderStart = Clock::now();
   streamsWaitForStream(
       concatEvent,
       std::vector<rmm::cuda_stream_view>{inputTableStream},
       finalStream);
+  recordRuntimeTiming(
+      "cudfHashAggFinalGroupbyStreamOrderNanos", streamOrderStart);
 
+  const auto mergeStart = Clock::now();
   auto compactedOutput = doGroupByAggregation(
       concatenatedTable->view(),
       groupingKeyOutputChannels_,
       intermediateAggregators_,
       bufferedResultType_,
       finalStream);
+  recordRuntimeTiming("cudfHashAggFinalGroupbyMergeGroupByNanos", mergeStart);
   bufferedResult_ = compactedOutput;
+  if (bufferedResult_) {
+    recordRuntimeStat(
+        "cudfHashAggFinalGroupbyBufferedRowsAfter", bufferedResult_->size());
+  }
 }
 
 void CudfHashAggregation::computeSingleGroupbyStreaming(CudfVectorPtr tbl) {
+  ScopedRuntimeStat scope(this, "cudfHashAggSingleGroupbyStreamingTotalNanos");
+  recordRuntimeStat("cudfHashAggSingleGroupbyStreamingInputRows", tbl->size());
+
   auto inputTableStream = tbl->stream();
   auto permutedInputView = tbl->getTableView().select(
       aggregationInputChannels_.begin(), aggregationInputChannels_.end());
@@ -1343,8 +1431,13 @@ void CudfHashAggregation::computeSingleGroupbyStreaming(CudfVectorPtr tbl) {
         std::vector<rmm::cuda_stream_view>{inputTableStream},
         partialOutputStream);
 
+    const auto concatStart = Clock::now();
     auto concatenatedTable =
         cudf::concatenate(tablesToConcat, partialOutputStream, get_temp_mr());
+    recordRuntimeTiming("cudfHashAggSingleGroupbyConcatNanos", concatStart);
+    recordRuntimeStat(
+        "cudfHashAggSingleGroupbyConcatRows",
+        concatenatedTable->num_rows());
 
     // Order the input batch's deallocation after the concatenate read. The
     // concat reads groupbyOnInput (produced on inputTableStream) on
@@ -1352,17 +1445,22 @@ void CudfHashAggregation::computeSingleGroupbyStreaming(CudfVectorPtr tbl) {
     // its stream-ordered async free can let cudaMallocAsync recycle the block
     // while the concat is still reading it (cudaErrorIllegalAddress).
     CudaEvent concatEvent(cudaEventDisableTiming);
+    const auto streamOrderStart = Clock::now();
     streamsWaitForStream(
         concatEvent,
         std::vector<rmm::cuda_stream_view>{inputTableStream},
         partialOutputStream);
+    recordRuntimeTiming(
+        "cudfHashAggSingleGroupbyStreamOrderNanos", streamOrderStart);
 
+    const auto mergeStart = Clock::now();
     auto compactedOutput = doGroupByAggregation(
         concatenatedTable->view(),
         groupingKeyOutputChannels_,
         intermediateAggregators_,
         bufferedResultType_,
         partialOutputStream);
+    recordRuntimeTiming("cudfHashAggSingleGroupbyMergeGroupByNanos", mergeStart);
     bufferedResult_ = compactedOutput;
   } else {
     bufferedResult_ = groupbyOnInput;
@@ -1370,16 +1468,22 @@ void CudfHashAggregation::computeSingleGroupbyStreaming(CudfVectorPtr tbl) {
 }
 
 void CudfHashAggregation::addInput(RowVectorPtr input) {
+  ScopedRuntimeStat scope(this, "cudfHashAggAddInputTotalNanos");
   VELOX_NVTX_OPERATOR_FUNC_RANGE();
   if (input->size() == 0) {
     return;
   }
   numInputRows_ += input->size();
+  recordRuntimeStat("cudfHashAggAddInputRows", input->size());
+  recordRuntimeStat("cudfHashAggAddInputBatches", 1);
 
+  const auto prepareStart = Clock::now();
   auto cudfInput = std::dynamic_pointer_cast<cudf_velox::CudfVector>(input);
   VELOX_CHECK_NOT_NULL(cudfInput);
+  recordRuntimeTiming("cudfHashAggAddInputPrepareNanos", prepareStart);
 
   if (isPartialOutput_ && !isGlobal_ && streamingEnabled_) {
+    const auto pathStart = Clock::now();
     if (isDistinct_) {
       // Handle partial distinct aggregation.
       computePartialDistinctStreaming(cudfInput);
@@ -1387,21 +1491,28 @@ void CudfHashAggregation::addInput(RowVectorPtr input) {
       // Handle partial groupby aggregation.
       computePartialGroupbyStreaming(cudfInput);
     }
+    recordRuntimeTiming("cudfHashAggAddInputPartialStreamingNanos", pathStart);
     return;
   }
 
   if (isSingleStep_ && streamingEnabled_ && !isGlobal_ && !isDistinct_) {
+    const auto pathStart = Clock::now();
     computeSingleGroupbyStreaming(cudfInput);
+    recordRuntimeTiming("cudfHashAggAddInputSingleStreamingNanos", pathStart);
     return;
   }
 
   if (!isPartialOutput_ && streamingEnabled_ && !isGlobal_ && !isDistinct_) {
+    const auto pathStart = Clock::now();
     computeFinalGroupbyStreaming(cudfInput);
+    recordRuntimeTiming("cudfHashAggAddInputFinalStreamingNanos", pathStart);
     return;
   }
 
   // Handle non-streaming or global cases.
+  const auto bufferedStart = Clock::now();
   inputs_.push_back(std::move(cudfInput));
+  recordRuntimeTiming("cudfHashAggAddInputBufferedNanos", bufferedStart);
 }
 
 CudfVectorPtr CudfHashAggregation::doGroupByAggregation(
@@ -1424,44 +1535,68 @@ CudfVectorPtr CudfHashAggregation::doGroupByAggregation(
           isGlobal_,
           isDistinct_,
           streamingEnabled_));
+  ScopedRuntimeStat scope(this, "cudfHashAggGroupByTotalNanos");
+  recordRuntimeStat("cudfHashAggGroupByCalls", 1);
+  recordRuntimeStat("cudfHashAggGroupByInputRows", tableView.num_rows());
+  recordRuntimeStat("cudfHashAggGroupByInputColumns", tableView.num_columns());
+  recordRuntimeStat("cudfHashAggGroupByKeyColumns", groupByKeys.size());
+  recordRuntimeStat("cudfHashAggGroupByAggregates", aggregators.size());
+
+  const auto keySelectStart = Clock::now();
   auto groupbyKeyView =
       tableView.select(groupByKeys.begin(), groupByKeys.end());
+  recordRuntimeTiming("cudfHashAggGroupByKeySelectNanos", keySelectStart);
 
   size_t const numGroupingKeys = groupbyKeyView.num_columns();
 
   // TODO: All other args to groupby are related to sort groupby. We don't
   // support optimizations related to it yet.
+  const auto ctorStart = Clock::now();
   cudf::groupby::groupby groupByOwner(
       groupbyKeyView,
       ignoreNullKeys_ ? cudf::null_policy::EXCLUDE
                       : cudf::null_policy::INCLUDE);
+  recordRuntimeTiming("cudfHashAggGroupByCtorNanos", ctorStart);
 
+  const auto requestStart = Clock::now();
   std::vector<cudf::groupby::aggregation_request> requests;
   for (auto& aggregator : aggregators) {
     aggregator->addGroupbyRequest(tableView, requests);
   }
+  recordRuntimeTiming("cudfHashAggGroupByRequestBuildNanos", requestStart);
+  recordRuntimeStat("cudfHashAggGroupByRequests", requests.size());
 
+  const auto aggregateStart = Clock::now();
   auto [groupKeys, results] =
       groupByOwner.aggregate(requests, stream, get_output_mr());
+  recordRuntimeTiming("cudfHashAggGroupByAggregateNanos", aggregateStart);
   // flatten the results
   std::vector<std::unique_ptr<cudf::column>> resultColumns;
 
   // first fill the grouping keys
+  const auto keyReleaseStart = Clock::now();
   auto groupKeysColumns = groupKeys->release();
   resultColumns.insert(
       resultColumns.begin(),
       std::make_move_iterator(groupKeysColumns.begin()),
       std::make_move_iterator(groupKeysColumns.end()));
+  recordRuntimeTiming("cudfHashAggGroupByKeyReleaseNanos", keyReleaseStart);
 
   // then fill the aggregation results
+  const auto outputColumnStart = Clock::now();
   for (auto& aggregator : aggregators) {
     resultColumns.push_back(aggregator->makeOutputColumn(results, stream));
   }
+  recordRuntimeTiming(
+      "cudfHashAggGroupByOutputColumnNanos", outputColumnStart);
 
   // make a cudf table out of columns
+  const auto wrapStart = Clock::now();
   auto resultTable = std::make_unique<cudf::table>(std::move(resultColumns));
 
   auto numRows = resultTable->num_rows();
+  recordRuntimeStat("cudfHashAggGroupByOutputRows", numRows);
+  recordRuntimeTiming("cudfHashAggGroupByWrapOutputNanos", wrapStart);
 
   // velox expects nullptr instead of a table with 0 rows
   if (numRows == 0) {
@@ -1475,11 +1610,16 @@ CudfVectorPtr CudfHashAggregation::doGroupByAggregation(
 CudfVectorPtr CudfHashAggregation::doGlobalAggregation(
     cudf::table_view tableView,
     rmm::cuda_stream_view stream) {
+  ScopedRuntimeStat scope(this, "cudfHashAggGlobalAggregationTotalNanos");
+  recordRuntimeStat("cudfHashAggGlobalAggregationInputRows", tableView.num_rows());
+
   std::vector<std::unique_ptr<cudf::column>> resultColumns;
   resultColumns.reserve(aggregators_.size());
   for (auto i = 0; i < aggregators_.size(); i++) {
+    const auto reduceStart = Clock::now();
     resultColumns.push_back(
         aggregators_[i]->doReduce(tableView, outputType_->childAt(i), stream));
+    recordRuntimeTiming("cudfHashAggGlobalReduceNanos", reduceStart);
   }
 
   return std::make_shared<cudf_velox::CudfVector>(
@@ -1494,6 +1634,10 @@ CudfVectorPtr CudfHashAggregation::getDistinctKeys(
     cudf::table_view tableView,
     std::vector<column_index_t> const& groupByKeys,
     rmm::cuda_stream_view stream) {
+  ScopedRuntimeStat scope(this, "cudfHashAggDistinctTotalNanos");
+  recordRuntimeStat("cudfHashAggDistinctInputRows", tableView.num_rows());
+
+  const auto distinctStart = Clock::now();
   auto result = cudf::distinct(
       tableView.select(groupByKeys.begin(), groupByKeys.end()),
       {groupingKeyOutputChannels_.begin(), groupingKeyOutputChannels_.end()},
@@ -1502,8 +1646,10 @@ CudfVectorPtr CudfHashAggregation::getDistinctKeys(
       cudf::nan_equality::ALL_EQUAL,
       stream,
       get_output_mr());
+  recordRuntimeTiming("cudfHashAggDistinctCallNanos", distinctStart);
 
   auto numRows = result->num_rows();
+  recordRuntimeStat("cudfHashAggDistinctOutputRows", numRows);
 
   // velox expects nullptr instead of a table with 0 rows
   if (numRows == 0) {
@@ -1515,8 +1661,10 @@ CudfVectorPtr CudfHashAggregation::getDistinctKeys(
 }
 
 CudfVectorPtr CudfHashAggregation::releaseAndResetPartialOutput() {
+  ScopedRuntimeStat scope(this, "cudfHashAggReleasePartialTotalNanos");
   VELOX_DCHECK(!isGlobal_);
   auto numOutputRows = bufferedResult_->size();
+  recordRuntimeStat("cudfHashAggReleasePartialRows", numOutputRows);
   const double aggregationPct =
       numOutputRows == 0 ? 0 : (numOutputRows * 1.0) / numInputRows_ * 100;
   {
@@ -1543,6 +1691,7 @@ CudfVectorPtr CudfHashAggregation::releaseAndResetPartialOutput() {
 }
 
 RowVectorPtr CudfHashAggregation::getOutput() {
+  ScopedRuntimeStat scope(this, "cudfHashAggGetOutputTotalNanos");
   VELOX_NVTX_OPERATOR_FUNC_RANGE();
 
   // Handle partial groupby and distinct.
@@ -1592,14 +1741,27 @@ RowVectorPtr CudfHashAggregation::getOutput() {
       return nullptr;
     }
     auto stream = bufferedResult_->stream();
+    recordRuntimeStat(
+        "cudfHashAggGetOutputSingleStreamingBufferedRows",
+        bufferedResult_->size());
+    const auto groupByStart = Clock::now();
     auto result = doGroupByAggregation(
         bufferedResult_->getTableView(),
         groupingKeyOutputChannels_,
         finalAggregators_,
         outputType_,
         stream);
+    recordRuntimeTiming(
+        "cudfHashAggGetOutputSingleStreamingGroupByNanos", groupByStart);
+    const auto syncStart = Clock::now();
     stream.synchronize();
+    recordRuntimeTiming(
+        "cudfHashAggGetOutputSingleStreamingSyncNanos", syncStart);
     bufferedResult_.reset();
+    if (result) {
+      recordRuntimeStat(
+          "cudfHashAggGetOutputSingleStreamingOutputRows", result->size());
+    }
     return result;
   }
 
@@ -1614,14 +1776,27 @@ RowVectorPtr CudfHashAggregation::getOutput() {
       return nullptr;
     }
     auto stream = bufferedResult_->stream();
+    recordRuntimeStat(
+        "cudfHashAggGetOutputFinalStreamingBufferedRows",
+        bufferedResult_->size());
+    const auto groupByStart = Clock::now();
     auto result = doGroupByAggregation(
         bufferedResult_->getTableView(),
         groupingKeyOutputChannels_,
         aggregators_,
         outputType_,
         stream);
+    recordRuntimeTiming(
+        "cudfHashAggGetOutputFinalStreamingGroupByNanos", groupByStart);
+    const auto syncStart = Clock::now();
     stream.synchronize();
+    recordRuntimeTiming(
+        "cudfHashAggGetOutputFinalStreamingSyncNanos", syncStart);
     bufferedResult_.reset();
+    if (result) {
+      recordRuntimeStat(
+          "cudfHashAggGetOutputFinalStreamingOutputRows", result->size());
+    }
     return result;
   }
 
@@ -1631,8 +1806,10 @@ RowVectorPtr CudfHashAggregation::getOutput() {
 
   auto stream = cudfGlobalStreamPool().get_stream();
 
+  const auto concatStart = Clock::now();
   auto tbl = getConcatenatedTable(
       std::exchange(inputs_, {}), inputType_, stream, get_output_mr());
+  recordRuntimeTiming("cudfHashAggGetOutputConcatInputNanos", concatStart);
 
   if (noMoreInput_) {
     finished_ = true;
@@ -1643,20 +1820,38 @@ RowVectorPtr CudfHashAggregation::getOutput() {
   // Use tbl->view() instead of moving the table.
   // tbl stays alive until the end of this function, keeping the view valid.
   if (isDistinct_) {
-    return getDistinctKeys(tbl->view(), groupingKeyInputChannels_, stream);
+    const auto distinctStart = Clock::now();
+    auto result = getDistinctKeys(tbl->view(), groupingKeyInputChannels_, stream);
+    recordRuntimeTiming("cudfHashAggGetOutputDistinctNanos", distinctStart);
+    if (result) {
+      recordRuntimeStat("cudfHashAggGetOutputDistinctRows", result->size());
+    }
+    return result;
   }
 
   auto permutedInputView = tbl->view().select(
       aggregationInputChannels_.begin(), aggregationInputChannels_.end());
   if (isGlobal_) {
-    return doGlobalAggregation(permutedInputView, stream);
+    const auto globalStart = Clock::now();
+    auto result = doGlobalAggregation(permutedInputView, stream);
+    recordRuntimeTiming("cudfHashAggGetOutputGlobalNanos", globalStart);
+    if (result) {
+      recordRuntimeStat("cudfHashAggGetOutputGlobalRows", result->size());
+    }
+    return result;
   } else {
-    return doGroupByAggregation(
+    const auto groupByStart = Clock::now();
+    auto result = doGroupByAggregation(
         permutedInputView,
         groupingKeyOutputChannels_,
         aggregators_,
         outputType_,
         stream);
+    recordRuntimeTiming("cudfHashAggGetOutputGroupByNanos", groupByStart);
+    if (result) {
+      recordRuntimeStat("cudfHashAggGetOutputGroupByRows", result->size());
+    }
+    return result;
   }
 }
 

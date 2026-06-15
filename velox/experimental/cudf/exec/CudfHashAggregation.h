@@ -23,6 +23,8 @@
 
 #include <cudf/groupby.hpp>
 
+#include <chrono>
+#include <string_view>
 #include <unordered_map>
 
 namespace facebook::velox::cudf_velox {
@@ -93,6 +95,25 @@ class CudfHashAggregation : public exec::Operator, public NvtxHelper {
   bool isFinished() override;
 
  private:
+  using Clock = std::chrono::steady_clock;
+
+  class ScopedRuntimeStat {
+   public:
+    ScopedRuntimeStat(CudfHashAggregation* op, std::string_view name);
+    ~ScopedRuntimeStat();
+
+   private:
+    CudfHashAggregation* op_;
+    std::string_view name_;
+    Clock::time_point start_;
+  };
+
+  void recordRuntimeStat(
+      std::string_view name,
+      int64_t value,
+      RuntimeCounter::Unit unit = RuntimeCounter::Unit::kNone);
+  void recordRuntimeTiming(std::string_view name, Clock::time_point start);
+
   // Setups the projections for accessing grouping keys stored in grouping
   // set.
   // For 'groupingKeyInputChannels', the index is the key column index from
