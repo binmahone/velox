@@ -19,12 +19,12 @@
 
 #include "velox/buffer/Buffer.h"
 #include "velox/common/memory/MemoryPool.h"
-#include "velox/common/process/StackTrace.h"
 #include "velox/vector/TypeAliases.h"
 
 #include <cudf/column/column.hpp>
 #include <cudf/table/table.hpp>
 
+#include <atomic>
 #include <chrono>
 
 namespace facebook::velox::cudf_velox {
@@ -144,9 +144,13 @@ void logDefaultStreamIfNeeded(
   if (stream.value() != rmm::cuda_stream_default.value()) {
     return;
   }
+  static std::atomic<bool> logged{false};
+  if (logged.exchange(true)) {
+    return;
+  }
   LOG(WARNING) << constructorName
-               << " constructed with default CUDA stream. Backtrace:\n"
-               << process::StackTrace().toString();
+               << " constructed with default CUDA stream. "
+               << "Further default-stream warnings are suppressed.";
 }
 
 } // namespace
