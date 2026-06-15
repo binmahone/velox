@@ -25,8 +25,26 @@
 #include <cudf/column/column.hpp>
 #include <cudf/table/table.hpp>
 
+#include <chrono>
+
 namespace facebook::velox::cudf_velox {
 namespace {
+
+using Clock = std::chrono::steady_clock;
+using RuntimeStatRecorder = CudfVector::RuntimeStatRecorder;
+
+void recordRuntimeTiming(
+    const RuntimeStatRecorder& recorder,
+    std::string_view name,
+    Clock::time_point start) {
+  if (!recorder) {
+    return;
+  }
+  const auto elapsed = Clock::now() - start;
+  recorder(
+      name,
+      std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count());
+}
 
 /// Calculates the total memory size in bytes of a cudf column and reconstructs
 /// it.
@@ -38,26 +56,40 @@ namespace {
 /// @return A pair containing the total size in bytes and the reconstructed
 /// column
 std::pair<uint64_t, std::unique_ptr<cudf::column>> getColumnSize(
-    std::unique_ptr<cudf::column> column) {
+    std::unique_ptr<cudf::column> column,
+    const RuntimeStatRecorder& recorder) {
+  const auto totalStart = Clock::now();
+
   // Store column metadata (type, null count, and size) before releasing it,
   // as the release() operation transfers ownership of the underlying buffers
   // and invalidates access to these properties.
+  const auto metadataStart = Clock::now();
   auto type = column->type();
   auto nullCount = column->null_count();
   auto size = column->size();
+  recordRuntimeTiming(recorder, "ColumnMetadataNanos", metadataStart);
 
+  const auto releaseStart = Clock::now();
   auto contents = column->release();
+  recordRuntimeTiming(recorder, "ColumnReleaseNanos", releaseStart);
+
+  const auto bufferSizeStart = Clock::now();
   auto bytes = contents.data->size() + contents.null_mask->size();
+  recordRuntimeTiming(recorder, "ColumnBufferSizeNanos", bufferSizeStart);
 
   // Recursively get the size of the children columns.
+  const auto childrenStart = Clock::now();
   std::vector<std::unique_ptr<cudf::column>> children;
   for (auto& child : contents.children) {
-    auto [childBytes, childColumn] = getColumnSize(std::move(child));
+    auto [childBytes, childColumn] =
+        getColumnSize(std::move(child), recorder);
     bytes += childBytes;
     children.push_back(std::move(childColumn));
   }
+  recordRuntimeTiming(recorder, "ColumnChildrenNanos", childrenStart);
 
   // Reassemble the column with the original metadata.
+  const auto reconstructStart = Clock::now();
   auto reconstitutedColumn = std::make_unique<cudf::column>(
       type,
       size,
@@ -65,6 +97,8 @@ std::pair<uint64_t, std::unique_ptr<cudf::column>> getColumnSize(
       std::move(*contents.null_mask.release()),
       nullCount,
       std::move(children));
+  recordRuntimeTiming(recorder, "ColumnReconstructNanos", reconstructStart);
+  recordRuntimeTiming(recorder, "ColumnTotalNanos", totalStart);
 
   return std::make_pair(bytes, std::move(reconstitutedColumn));
 }
@@ -82,18 +116,26 @@ std::pair<uint64_t, std::unique_ptr<cudf::column>> getColumnSize(
 /// @return A pair containing the total size in bytes and the reconstructed
 /// table
 std::pair<uint64_t, std::unique_ptr<cudf::table>> getTableSize(
-    std::unique_ptr<cudf::table>&& table) {
+    std::unique_ptr<cudf::table>&& table,
+    const RuntimeStatRecorder& recorder) {
+  const auto releaseStart = Clock::now();
   auto columns = table->release();
+  recordRuntimeTiming(recorder, "TableReleaseNanos", releaseStart);
+
   std::vector<std::unique_ptr<cudf::column>> columnsOut;
   uint64_t totalBytes = 0;
 
   for (auto& column : columns) {
-    auto [bytes, columnOut] = getColumnSize(std::move(column));
+    auto [bytes, columnOut] = getColumnSize(std::move(column), recorder);
     totalBytes += bytes;
     columnsOut.push_back(std::move(columnOut));
   }
+
+  const auto reconstructStart = Clock::now();
+  auto output = std::make_unique<cudf::table>(std::move(columnsOut));
+  recordRuntimeTiming(recorder, "TableReconstructNanos", reconstructStart);
   return std::make_pair(
-      totalBytes, std::make_unique<cudf::table>(std::move(columnsOut)));
+      totalBytes, std::move(output));
 }
 
 void logDefaultStreamIfNeeded(
@@ -114,7 +156,8 @@ CudfVector::CudfVector(
     TypePtr type,
     vector_size_t size,
     std::unique_ptr<cudf::table>&& table,
-    rmm::cuda_stream_view stream)
+    rmm::cuda_stream_view stream,
+    RuntimeStatRecorder runtimeStatRecorder)
     : RowVector(
           pool,
           std::move(type),
@@ -126,10 +169,16 @@ CudfVector::CudfVector(
       stream_{stream} {
   logDefaultStreamIfNeeded(stream_, "CudfVector(table)");
   auto& tablePtr = std::get<std::unique_ptr<cudf::table>>(tableStorage_);
-  auto [bytes, tableOut] = getTableSize(std::move(tablePtr));
+  const auto tableSizeStart = Clock::now();
+  auto [bytes, tableOut] =
+      getTableSize(std::move(tablePtr), runtimeStatRecorder);
+  recordRuntimeTiming(
+      runtimeStatRecorder, "TableSizeTotalNanos", tableSizeStart);
   flatSize_ = bytes;
   tablePtr = std::move(tableOut);
+  const auto viewStart = Clock::now();
   tabView_ = tablePtr->view();
+  recordRuntimeTiming(runtimeStatRecorder, "TableViewNanos", viewStart);
 }
 
 CudfVector::CudfVector(

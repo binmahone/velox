@@ -24,7 +24,10 @@
 
 #include <rmm/cuda_stream_view.hpp>
 
+#include <cstdint>
+#include <functional>
 #include <memory>
+#include <string_view>
 #include <utility>
 #include <variant>
 
@@ -37,13 +40,16 @@ namespace facebook::velox::cudf_velox {
 // GPU data.
 class CudfVector : public RowVector {
  public:
+  using RuntimeStatRecorder = std::function<void(std::string_view, int64_t)>;
+
   /// Constructs a CudfVector from an owned cudf::table.
   CudfVector(
       velox::memory::MemoryPool* pool,
       TypePtr type,
       vector_size_t size,
       std::unique_ptr<cudf::table>&& table,
-      rmm::cuda_stream_view stream);
+      rmm::cuda_stream_view stream,
+      RuntimeStatRecorder runtimeStatRecorder = nullptr);
 
   /// Constructs a CudfVector from packed_table.
   /// The packed data is retained and tabView_ references the table view inside

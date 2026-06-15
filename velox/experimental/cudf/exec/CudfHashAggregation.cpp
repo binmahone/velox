@@ -1628,8 +1628,20 @@ CudfVectorPtr CudfHashAggregation::doGroupByAggregation(
   }
 
   const auto vectorWrapStart = Clock::now();
+  cudf_velox::CudfVector::RuntimeStatRecorder vectorStatRecorder =
+      [this](std::string_view suffix, int64_t value) {
+        recordRuntimeStat(
+            fmt::format("cudfHashAggGroupByMakeVector{}", suffix),
+            value,
+            RuntimeCounter::Unit::kNanos);
+      };
   auto output = std::make_shared<cudf_velox::CudfVector>(
-      pool(), outputType, numRows, std::move(resultTable), stream);
+      pool(),
+      outputType,
+      numRows,
+      std::move(resultTable),
+      stream,
+      std::move(vectorStatRecorder));
   recordRuntimeTiming("cudfHashAggGroupByMakeVectorNanos", vectorWrapStart);
 
   const auto resultsClearStart = Clock::now();
