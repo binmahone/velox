@@ -88,6 +88,11 @@ class CudfHiveConfig {
   static constexpr const char* kUseExperimentalCudfReaderSession =
       "cudf.hive.use_experimental_reader";
 
+  static constexpr const char* kScanDiagnosticsEnabled =
+      "cudf.hive.scan-diagnostics-enabled";
+  static constexpr const char* kScanDiagnosticsEnabledSession =
+      "cudf.hive.scan_diagnostics_enabled";
+
   // Writer config options
 
   /// Whether new data can be inserted into a CudfHive file
@@ -158,6 +163,9 @@ class CudfHiveConfig {
   bool useExperimentalCudfReader() const;
   bool useExperimentalCudfReaderSession(
       const config::ConfigBase* session) const;
+
+  bool scanDiagnosticsEnabled() const;
+  bool scanDiagnosticsEnabledSession(const config::ConfigBase* session) const;
 
   bool immutableFiles() const;
 

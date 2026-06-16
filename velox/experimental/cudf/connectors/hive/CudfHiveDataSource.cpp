@@ -54,14 +54,30 @@
 
 #include <fmt/format.h>
 
+#include <exception>
 #include <filesystem>
 #include <memory>
+#include <sstream>
 #include <string>
+#include <vector>
 
 namespace facebook::velox::cudf_velox::connector::hive {
 
 using namespace facebook::velox::connector;
 using namespace facebook::velox::connector::hive;
+
+namespace {
+std::string formatColumnNames(const std::vector<std::string>& columns) {
+  std::ostringstream out;
+  for (size_t i = 0; i < columns.size(); ++i) {
+    if (i > 0) {
+      out << ",";
+    }
+    out << columns[i];
+  }
+  return out.str();
+}
+} // namespace
 
 CudfHiveDataSource::CudfHiveDataSource(
     const RowTypePtr& outputType,
@@ -209,6 +225,9 @@ std::optional<RowVectorPtr> CudfHiveDataSource::next(
 
   // Record start time before reading chunk
   auto startTimeUs = getCurrentTimeMicro();
+  const auto scanDiagnosticsEnabled =
+      cudfHiveConfig_->scanDiagnosticsEnabledSession(
+          connectorQueryCtx_->sessionProperties());
 
   if (not useExperimentalSplitReader_) {
     // Read table using the regular cudf parquet reader
@@ -221,16 +240,36 @@ std::optional<RowVectorPtr> CudfHiveDataSource::next(
     ScopedGpuMemoryOperatorContext gpuMemoryAttribution(
         fmt::format(
             "CudfHiveDataSource[phase=read_chunk,split={}]", split_->filePath));
-    auto tableWithMetadata = splitReader_->read_chunk();
+    auto tableWithMetadata = [&]() {
+      try {
+        return splitReader_->read_chunk();
+      } catch (const std::exception& e) {
+        if (scanDiagnosticsEnabled) {
+          LOG(ERROR)
+              << "CudfHiveDataSource read_chunk failed: split="
+              << split_->filePath << " start=" << split_->start
+              << " length=" << split_->length
+              << " chunkReadLimit=" << cudfHiveConfig_->maxChunkReadLimit()
+              << " passReadLimit=" << cudfHiveConfig_->maxPassReadLimit()
+              << " useBufferedInput="
+              << cudfHiveConfig_->useBufferedInputSession(
+                     connectorQueryCtx_->sessionProperties())
+              << " useExperimentalReader=false columns=["
+              << formatColumnNames(readColumnNames_) << "] error=" << e.what();
+        }
+        throw;
+      }
+    }();
     cudfTable = std::move(tableWithMetadata.tbl);
     metadata = std::move(tableWithMetadata.metadata);
-    // Capture per-chunk emit size so we can correlate scan-level batch
-    // granularity against downstream operator NVTX events. Used to localize
-    // where the 960-batch fragmentation seen in Q8 originates.
-    LOG(WARNING) << "CudfHiveDataSource::next chunk: rows="
-                 << cudfTable->num_rows()
-                 << " cols=" << cudfTable->num_columns()
-                 << " split=" << split_->filePath;
+    if (scanDiagnosticsEnabled) {
+      LOG(WARNING) << "CudfHiveDataSource::next chunk: rows="
+                   << cudfTable->num_rows()
+                   << " cols=" << cudfTable->num_columns()
+                   << " split=" << split_->filePath
+                   << " start=" << split_->start
+                   << " length=" << split_->length;
+    }
   } else {
     // Read table using the experimental parquet reader
     VELOX_CHECK_NOT_NULL(
@@ -290,7 +329,26 @@ std::optional<RowVectorPtr> CudfHiveDataSource::next(
       return nullptr;
     }
 
-    auto tableWithMetadata = exptSplitReader_->materialize_all_columns_chunk();
+    auto tableWithMetadata = [&]() {
+      try {
+        return exptSplitReader_->materialize_all_columns_chunk();
+      } catch (const std::exception& e) {
+        if (scanDiagnosticsEnabled) {
+          LOG(ERROR)
+              << "CudfHiveDataSource materialize_all_columns_chunk failed: split="
+              << split_->filePath << " start=" << split_->start
+              << " length=" << split_->length
+              << " chunkReadLimit=" << cudfHiveConfig_->maxChunkReadLimit()
+              << " passReadLimit=" << cudfHiveConfig_->maxPassReadLimit()
+              << " useBufferedInput="
+              << cudfHiveConfig_->useBufferedInputSession(
+                     connectorQueryCtx_->sessionProperties())
+              << " useExperimentalReader=true columns=["
+              << formatColumnNames(readColumnNames_) << "] error=" << e.what();
+        }
+        throw;
+      }
+    }();
     cudfTable = std::move(tableWithMetadata.tbl);
     metadata = std::move(tableWithMetadata.metadata);
   }
